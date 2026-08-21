@@ -159,7 +159,13 @@ def _encode_base32(n: int, length: int) -> str:
 
 
 def _get_writer(config: SpineConfig, profile: str = "agent:main") -> JSONLWriter:
-    """Get JSONL writer for a profile's observations file."""
+    """Get JSONL writer for a profile's observations file.
+
+    A wildcard is a READ scope. Writing one would create a file literally named
+    "*.jsonl" and the record would be invisible to every rebuild.
+    """
+    if profile in ("*", "all"):
+        raise ValueError("refusing to write to a wildcard profile; resolve it first")
     obs_dir = os.path.join(config.canonical_root, "observations")
     return JSONLWriter(os.path.join(obs_dir, f"{profile}.jsonl"))
 
@@ -421,7 +427,9 @@ def handle_forget(args: Dict[str, Any], config: SpineConfig) -> str:
     profile = args.get("profile", "*")
 
     idx = _get_index(config)
-    writer = _get_writer(config, profile)
+    # The writer is built AFTER the row's real profile is known: `profile` may
+    # be the "*" read scope, and a wildcard has no JSONL to write to.
+    writer = None
 
     if action == "discover":
         if not term:
@@ -451,16 +459,31 @@ def handle_forget(args: Dict[str, Any], config: SpineConfig) -> str:
             return json.dumps({"error": "obs_id required for action=delete"})
 
         # Verify the observation exists
-        row = idx.conn.execute(
-            "SELECT id, content FROM observations WHERE id=? AND profile IN (?, 'shared')",
-            (obs_id, profile),
-        ).fetchone()
+        # "*" means every profile. The literal comparison below matched a
+        # profile actually named "*", of which there are none, so widening the
+        # default silently broke delete for every row in the store.
+        if profile in ("*", "all"):
+            row = idx.conn.execute(
+                "SELECT id, content, profile FROM observations WHERE id=?",
+                (obs_id,),
+            ).fetchone()
+        else:
+            row = idx.conn.execute(
+                "SELECT id, content, profile FROM observations"
+                " WHERE id=? AND profile IN (?, 'shared')",
+                (obs_id, profile),
+            ).fetchone()
 
         if row is None:
             idx.close()
             return json.dumps({"error": f"Observation {obs_id} not found"})
 
         content = row[1]
+        # Resolve the concrete profile before writing: _get_writer("*") would
+        # build JSONLWriter(observations/*.jsonl) and the tombstone would not
+        # survive a rebuild.
+        profile = row[2] or "agent:main"
+        writer = _get_writer(config, profile)
 
         # Delete from index
         idx.delete_observation(obs_id)

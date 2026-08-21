@@ -51,6 +51,23 @@ def embedding_dim() -> int:
     global _embedding_dim
     if _embedding_dim is not None:
         return _embedding_dim
+    # Store first, as documented: the width that matters is the width of the
+    # bytes already on disk, and reading it costs no model load. Falling to the
+    # embedder here also meant max_bytes_per_vec() retried a failed model load
+    # once per vector inside _stack().
+    try:
+        import sqlite3 as _sq
+        from .config import load_spine_config
+        _c = _sq.connect(os.path.expanduser(load_spine_config().db))
+        _c.execute("PRAGMA query_only = ON")
+        _row = _c.execute(
+            "SELECT value FROM dim_meta WHERE key='embedding_dim'").fetchone()
+        _c.close()
+        if _row:
+            _embedding_dim = int(_row[0])
+            return _embedding_dim
+    except Exception:  # noqa: BLE001 — no store yet, or unreadable
+        pass
     try:
         from .embedder import get_embedding_dim
         d = get_embedding_dim()

@@ -2,19 +2,23 @@
   "profile": "*",
   "embedder": true,
   "k": 20,
-  "passed": 26,
+  "passed": 29,
   "by_hop": {
     "single": {
       "passed": 17,
       "total": 17
     },
+    "conj": {
+      "passed": 11,
+      "total": 11
+    },
     "multi": {
-      "passed": 9,
-      "total": 12
+      "passed": 1,
+      "total": 1
     }
   },
   "total": 29,
-  "median_search_ms": 10.6,
+  "median_search_ms": 14.1,
   "cases": [
     {
       "id": "sg-lwix-weighting",
@@ -29,8 +33,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 80.5,
-      "embed_ms": 367.8,
+      "search_ms": 139.5,
+      "embed_ms": 1297.4,
       "n_hits": 20,
       "n_wiki": 16,
       "top": [
@@ -130,8 +134,8 @@
       ],
       "n_sources": 11,
       "need_sources": 0,
-      "search_ms": 12.8,
-      "embed_ms": 32.9,
+      "search_ms": 15.3,
+      "embed_ms": 51.0,
       "n_hits": 20,
       "n_wiki": 4,
       "top": [
@@ -230,8 +234,8 @@
       ],
       "n_sources": 8,
       "need_sources": 0,
-      "search_ms": 11.5,
-      "embed_ms": 33.0,
+      "search_ms": 15.2,
+      "embed_ms": 40.3,
       "n_hits": 20,
       "n_wiki": 11,
       "top": [
@@ -328,8 +332,8 @@
       ],
       "n_sources": 10,
       "need_sources": 0,
-      "search_ms": 13.0,
-      "embed_ms": 34.6,
+      "search_ms": 19.4,
+      "embed_ms": 44.6,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -428,8 +432,8 @@
       ],
       "n_sources": 16,
       "need_sources": 0,
-      "search_ms": 12.5,
-      "embed_ms": 37.5,
+      "search_ms": 15.8,
+      "embed_ms": 49.8,
       "n_hits": 20,
       "n_wiki": 12,
       "top": [
@@ -526,8 +530,8 @@
       ],
       "n_sources": 4,
       "need_sources": 0,
-      "search_ms": 11.3,
-      "embed_ms": 35.2,
+      "search_ms": 25.1,
+      "embed_ms": 44.0,
       "n_hits": 20,
       "n_wiki": 6,
       "top": [
@@ -625,7 +629,7 @@
       ],
       "n_sources": 10,
       "need_sources": 0,
-      "search_ms": 9.8,
+      "search_ms": 16.7,
       "embed_ms": 20.8,
       "n_hits": 20,
       "n_wiki": 12,
@@ -724,8 +728,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 11.2,
-      "embed_ms": 18.3,
+      "search_ms": 15.4,
+      "embed_ms": 27.4,
       "n_hits": 20,
       "n_wiki": 17,
       "top": [
@@ -824,8 +828,8 @@
       ],
       "n_sources": 7,
       "need_sources": 0,
-      "search_ms": 8.4,
-      "embed_ms": 18.8,
+      "search_ms": 11.6,
+      "embed_ms": 22.7,
       "n_hits": 20,
       "n_wiki": 16,
       "top": [
@@ -922,8 +926,8 @@
       ],
       "n_sources": 2,
       "need_sources": 0,
-      "search_ms": 9.7,
-      "embed_ms": 18.5,
+      "search_ms": 31.2,
+      "embed_ms": 24.3,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -1021,8 +1025,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 8.6,
-      "embed_ms": 19.8,
+      "search_ms": 14.9,
+      "embed_ms": 32.4,
       "n_hits": 20,
       "n_wiki": 11,
       "top": [
@@ -1121,8 +1125,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 9.1,
-      "embed_ms": 20.1,
+      "search_ms": 14.0,
+      "embed_ms": 22.6,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -1220,8 +1224,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 11.1,
-      "embed_ms": 20.1,
+      "search_ms": 15.3,
+      "embed_ms": 20.6,
       "n_hits": 20,
       "n_wiki": 10,
       "top": [
@@ -1317,8 +1321,8 @@
       ],
       "n_sources": 2,
       "need_sources": 0,
-      "search_ms": 9.4,
-      "embed_ms": 21.0,
+      "search_ms": 12.1,
+      "embed_ms": 20.6,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -1415,8 +1419,8 @@
       ],
       "n_sources": 2,
       "need_sources": 0,
-      "search_ms": 9.2,
-      "embed_ms": 32.2,
+      "search_ms": 10.2,
+      "embed_ms": 37.3,
       "n_hits": 20,
       "n_wiki": 12,
       "top": [
@@ -1515,8 +1519,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 13.4,
-      "embed_ms": 21.5,
+      "search_ms": 14.0,
+      "embed_ms": 21.6,
       "n_hits": 20,
       "n_wiki": 5,
       "top": [
@@ -1613,8 +1617,8 @@
       ],
       "n_sources": 3,
       "need_sources": 0,
-      "search_ms": 10.5,
-      "embed_ms": 20.1,
+      "search_ms": 14.1,
+      "embed_ms": 22.5,
       "n_hits": 20,
       "n_wiki": 5,
       "top": [
@@ -1703,16 +1707,16 @@
     {
       "id": "mh-zo-safe-publish",
       "q": "what is the safe way for an agent to publish something to Zo",
-      "hop": "multi",
+      "hop": "conj",
       "passed": true,
       "matched": [
         "mcp first",
         "unauthenticated"
       ],
-      "n_sources": 2,
-      "need_sources": 2,
-      "search_ms": 10.3,
-      "embed_ms": 21.5,
+      "n_sources": 1,
+      "need_sources": 0,
+      "search_ms": 10.8,
+      "embed_ms": 21.2,
       "n_hits": 20,
       "n_wiki": 14,
       "top": [
@@ -1801,17 +1805,17 @@
     {
       "id": "mh-rebuild-unsafe",
       "q": "why is it unsafe to rebuild the spine index right now",
-      "hop": "multi",
+      "hop": "conj",
       "passed": true,
       "matched": [
         "status",
         "jsonl",
         "promote"
       ],
-      "n_sources": 3,
-      "need_sources": 2,
+      "n_sources": 1,
+      "need_sources": 0,
       "search_ms": 11.0,
-      "embed_ms": 22.3,
+      "embed_ms": 22.0,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -1900,16 +1904,16 @@
     {
       "id": "mh-blocked-cli",
       "q": "a shell command is blocked for Claude Code, what should I try before asking Chin",
-      "hop": "multi",
-      "passed": false,
+      "hop": "conj",
+      "passed": true,
       "matched": [
         "hermes chat",
         "classifier"
       ],
       "n_sources": 1,
-      "need_sources": 2,
-      "search_ms": 10.1,
-      "embed_ms": 43.9,
+      "need_sources": 0,
+      "search_ms": 11.5,
+      "embed_ms": 34.2,
       "n_hits": 20,
       "n_wiki": 9,
       "top": [
@@ -1998,16 +2002,16 @@
     {
       "id": "mh-secrets-route",
       "q": "how do I read a secret when the permission classifier blocks me",
-      "hop": "multi",
+      "hop": "conj",
       "passed": true,
       "matched": [
         "keychain",
         "classifier"
       ],
-      "n_sources": 2,
-      "need_sources": 2,
-      "search_ms": 9.9,
-      "embed_ms": 18.8,
+      "n_sources": 1,
+      "need_sources": 0,
+      "search_ms": 11.6,
+      "embed_ms": 20.1,
       "n_hits": 20,
       "n_wiki": 10,
       "top": [
@@ -2096,16 +2100,16 @@
     {
       "id": "mh-silent-failure",
       "q": "what keeps breaking silently in this system and what was meant to catch it",
-      "hop": "multi",
-      "passed": false,
+      "hop": "conj",
+      "passed": true,
       "matched": [
         "embedder",
         "heartbeat"
       ],
       "n_sources": 1,
-      "need_sources": 2,
-      "search_ms": 10.0,
-      "embed_ms": 18.3,
+      "need_sources": 0,
+      "search_ms": 23.3,
+      "embed_ms": 19.6,
       "n_hits": 20,
       "n_wiki": 12,
       "top": [
@@ -2194,17 +2198,17 @@
     {
       "id": "mh-who-drives-who",
       "q": "can Hermes start a Claude Code session, and can Zo",
-      "hop": "multi",
+      "hop": "conj",
       "passed": true,
       "matched": [
         "hermes",
         "zo",
         "initiate"
       ],
-      "n_sources": 3,
-      "need_sources": 2,
-      "search_ms": 11.0,
-      "embed_ms": 19.3,
+      "n_sources": 1,
+      "need_sources": 0,
+      "search_ms": 12.7,
+      "embed_ms": 20.4,
       "n_hits": 20,
       "n_wiki": 4,
       "top": [
@@ -2301,8 +2305,8 @@
       ],
       "n_sources": 2,
       "need_sources": 2,
-      "search_ms": 8.8,
-      "embed_ms": 19.5,
+      "search_ms": 9.5,
+      "embed_ms": 18.8,
       "n_hits": 20,
       "n_wiki": 11,
       "top": [
@@ -2391,17 +2395,17 @@
     {
       "id": "mh-memory-md-care",
       "q": "why does Hermes MEMORY.md need manual repair and what writes to it",
-      "hop": "multi",
+      "hop": "conj",
       "passed": true,
       "matched": [
         "two",
         "consolidation",
         "promote"
       ],
-      "n_sources": 3,
-      "need_sources": 2,
-      "search_ms": 11.6,
-      "embed_ms": 18.1,
+      "n_sources": 1,
+      "need_sources": 0,
+      "search_ms": 12.4,
+      "embed_ms": 18.6,
       "n_hits": 20,
       "n_wiki": 14,
       "top": [
@@ -2490,16 +2494,16 @@
     {
       "id": "mh-cron-traps",
       "q": "what goes wrong when creating a Hermes cron and how do I verify it worked",
-      "hop": "multi",
+      "hop": "conj",
       "passed": true,
       "matched": [
         "30m",
         "one-shot"
       ],
-      "n_sources": 2,
-      "need_sources": 2,
-      "search_ms": 12.1,
-      "embed_ms": 21.1,
+      "n_sources": 1,
+      "need_sources": 0,
+      "search_ms": 14.1,
+      "embed_ms": 20.7,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -2588,16 +2592,16 @@
     {
       "id": "mh-memory-sync-latency",
       "q": "if I write a Claude Code memory file now, when can Hermes search it",
-      "hop": "multi",
-      "passed": false,
+      "hop": "conj",
+      "passed": true,
       "matched": [
         "sync",
         "4 hours"
       ],
       "n_sources": 1,
-      "need_sources": 2,
-      "search_ms": 12.3,
-      "embed_ms": 20.5,
+      "need_sources": 0,
+      "search_ms": 13.7,
+      "embed_ms": 20.8,
       "n_hits": 20,
       "n_wiki": 12,
       "top": [
@@ -2686,16 +2690,16 @@
     {
       "id": "mh-verification-discipline",
       "q": "before I report that something works, what must I do first",
-      "hop": "multi",
+      "hop": "conj",
       "passed": true,
       "matched": [
         "negative control",
         "verify"
       ],
-      "n_sources": 2,
-      "need_sources": 2,
-      "search_ms": 10.0,
-      "embed_ms": 20.4,
+      "n_sources": 1,
+      "need_sources": 0,
+      "search_ms": 16.5,
+      "embed_ms": 19.6,
       "n_hits": 20,
       "n_wiki": 10,
       "top": [
@@ -2784,16 +2788,16 @@
     {
       "id": "mh-deploy-truth",
       "q": "how do I confirm a site change is actually live and not just committed",
-      "hop": "multi",
+      "hop": "conj",
       "passed": true,
       "matched": [
         "served",
         "worktree"
       ],
-      "n_sources": 2,
-      "need_sources": 2,
-      "search_ms": 10.6,
-      "embed_ms": 19.1,
+      "n_sources": 1,
+      "need_sources": 0,
+      "search_ms": 10.5,
+      "embed_ms": 23.4,
       "n_hits": 20,
       "n_wiki": 9,
       "top": [

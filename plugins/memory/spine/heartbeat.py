@@ -240,7 +240,12 @@ def check_consolidation(cfg):
 
 
 def check_eval(cfg):
-    here = os.path.dirname(os.path.abspath(__file__))
+    # NOT __file__. The cron wrapper execs this file's source, so __file__ is
+    # the wrapper's path (~/.hermes/scripts/spine) where no baseline exists --
+    # the check returned "no eval baseline saved" and the regression gate has
+    # never actually run under cron. Resolve from the imported module instead.
+    import spine.heartbeat as _self
+    here = os.path.dirname(os.path.abspath(_self.__file__))
     baselines = sorted(glob.glob(os.path.join(here, "eval_baseline_*.json")))
     if not baselines:
         return SKIP, "no eval baseline saved"
@@ -258,7 +263,9 @@ def check_eval(cfg):
         # to go quietly dark.
         return FAIL, f"eval harness failed to run: {type(e).__name__}: {e}"
     out = []
-    for hop in ("single", "multi"):
+    # All three sections, or a regression in the one left out goes unnoticed --
+    # which is the entire failure class this file exists for.
+    for hop in ("single", "conj", "multi"):
         b = base.get("by_hop", {}).get(hop, {}).get("passed")
         n = now.get("by_hop", {}).get(hop, {}).get("passed")
         tot = now.get("by_hop", {}).get(hop, {}).get("total")

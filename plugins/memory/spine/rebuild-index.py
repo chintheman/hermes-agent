@@ -133,6 +133,7 @@ def build_index(observations: List[Dict[str, Any]], db_path: str, dry_run: bool 
     Returns stats: {observations: N, episodes: N, wiki_chunks: N}
     """
     from spine.index import MemoryIndex
+    from spine import index as index_mod
 
     episodes = episodes or []
     stats: Dict[str, int] = {"observations": 0, "episodes": 0, "wiki_chunks": 0}
@@ -151,7 +152,15 @@ def build_index(observations: List[Dict[str, Any]], db_path: str, dry_run: bool 
     idx.open()
 
     # Check dimension consistency
+    # A full rebuild re-embeds everything, so it is the ONE place allowed to
+    # restamp the store width. dim_meta is INSERT OR IGNORE elsewhere, so
+    # without this a legitimate model swap leaves the store permanently
+    # mislabelled and check_embedder FAILs every night with no way back.
     stored_dim = idx.get_embedding_dim()
+    live_dim = index_mod.embedding_dim() if hasattr(index_mod, "embedding_dim") else stored_dim
+    if live_dim and live_dim != stored_dim:
+        print(f"  embedding width {stored_dim} -> {live_dim}; restamping dim_meta")
+        idx.set_embedding_dim(live_dim)
 
     # Upsert observations
     for i, obs in enumerate(observations):

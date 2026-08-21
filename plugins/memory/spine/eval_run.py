@@ -57,7 +57,7 @@ def run(profile: str = "agent:main") -> Dict[str, Any]:
         blob = "\n".join(docs)
         hop = case.get("hop", "single")
 
-        if hop == "multi":
+        if hop in ("multi", "conj"):
             # Every needle must appear, AND they must arrive from enough distinct
             # documents. Without the source count, one memory containing all the
             # phrases would pass a test meant to prove retrieval CONNECTED
@@ -70,13 +70,18 @@ def run(profile: str = "agent:main") -> Dict[str, Any]:
             # satisfy min_sources -- exactly the case this is meant to reject.
             per_doc = [{n for n in needles if n.lower() in d} for d in docs]
             covered, distinct = set(), 0
-            for owned in sorted(per_doc, key=len):
+            # DESCENDING. Greedy set-cover takes the largest set first; ascending
+            # counts {a} then {a,b} as two contributors, so one document holding
+            # every needle plus one unrelated mention still passed min_sources=2
+            # -- the exact case this rejects. Verified: 8 of 12 multi-hop cases
+            # passed only because of the wrong order.
+            for owned in sorted(per_doc, key=len, reverse=True):
                 fresh = owned - covered
                 if fresh:
                     covered |= fresh
                     distinct += 1
-            passed = (len(matched) == len(needles)
-                      and distinct >= case.get("min_sources", 2))
+            need = case.get("min_sources", 2) if hop == "multi" else 0
+            passed = len(matched) == len(needles) and distinct >= need
             n_sources = distinct
         else:
             matched = [p for p in case["expect_any"] if p.lower() in blob]
@@ -106,9 +111,11 @@ def run(profile: str = "agent:main") -> Dict[str, Any]:
     idx.close()
     passed = sum(1 for r in results if r["passed"])
     by_hop = {}
-    for hop in ("single", "multi"):
+    for hop in ("single", "conj", "multi"):
         sub = [r for r in results if r["hop"] == hop]
         by_hop[hop] = {"passed": sum(1 for r in sub if r["passed"]), "total": len(sub)}
+    if not any(v["total"] for v in by_hop.values()):
+        raise RuntimeError("eval set produced no scored cases")
     return {
         "profile": profile,
         "embedder": have_embedder,
@@ -121,9 +128,37 @@ def run(profile: str = "agent:main") -> Dict[str, Any]:
     }
 
 
+def validate() -> int:
+    """A multi-hop case is only meaningful if NO single document answers it.
+
+    11 of 12 cases were mislabelled multi-hop while a single memory held every
+    needle, so the section scored retrieval that never had to connect anything.
+    """
+    import sqlite3 as _sq
+    spec = json.load(open(EVAL, encoding="utf-8"))
+    con = _sq.connect(DB)
+    con.execute("PRAGMA query_only = ON")
+    docs = [r[0].lower() for r in con.execute("SELECT content FROM observations")]
+    docs += [(r[0] + ": " + r[1]).lower()
+             for r in con.execute("SELECT title, content FROM wiki_chunks")]
+    con.close()
+    bad = []
+    for c in spec["cases"]:
+        if c.get("hop") != "multi":
+            continue
+        ns = [n.lower() for n in c["expect_all"]]
+        if any(all(n in d for n in ns) for d in docs):
+            bad.append(c["id"])
+    for cid in bad:
+        print(f"MISLABELLED: {cid} — a single document contains every needle; "
+              f"this cannot test multi-hop. Reclassify as conj or change the needles.")
+    print(f"{len(bad)} invalid multi-hop case(s)")
+    return 1 if bad else 0
+
+
 def show(rep: Dict[str, Any]) -> None:
     print(f"\nprofile={rep['profile']}  embedder={rep['embedder']}  k={rep['k']}")
-    for hop in ("single", "multi"):
+    for hop in ("single", "conj", "multi"):
         sub = [r for r in rep["cases"] if r["hop"] == hop]
         if not sub:
             continue
@@ -134,13 +169,14 @@ def show(rep: Dict[str, Any]) -> None:
         for r in sub:
             mark = "PASS" if r["passed"] else "FAIL"
             got = ", ".join(r["matched"])[:30] or "-"
-            src = f"{r['n_sources']}/{r['need_sources']}" if hop == "multi" else str(r["n_sources"])
+            src = (f"{r['n_sources']}/{r['need_sources']}" if hop == "multi"
+                   else str(r["n_sources"]))
             print(f"{'':2} {r['id']:26} {mark:6} {r['search_ms']:>7} {src:>4}  {got}")
         print("-" * 82)
     b = rep["by_hop"]
-    print(f"\n   TOTAL {rep['passed']}/{rep['total']}   "
-          f"single {b['single']['passed']}/{b['single']['total']}   "
-          f"multi {b['multi']['passed']}/{b['multi']['total']}   "
+    parts = "   ".join(f"{h} {b[h]['passed']}/{b[h]['total']}"
+                       for h in ("single", "conj", "multi") if b.get(h, {}).get("total"))
+    print(f"\n   TOTAL {rep['passed']}/{rep['total']}   {parts}   "
           f"median search {rep['median_search_ms']} ms")
     wiki = sum(r["n_wiki"] for r in rep["cases"])
     print(f"   wiki chunks appearing in results: {wiki}\n")
@@ -174,10 +210,14 @@ def compare(new: Dict[str, Any], old_path: str) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", default="agent:main")
+    ap.add_argument("--validate", action="store_true",
+                    help="check every multi-hop case really needs >1 document, then exit")
     ap.add_argument("--save")
     ap.add_argument("--compare")
     a = ap.parse_args()
 
+    if a.validate:
+        sys.exit(validate())
     rep = run(a.profile)
     show(rep)
     if a.save:

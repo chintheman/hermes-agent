@@ -21,6 +21,9 @@ from typing import Any, Dict
 
 SPINE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SPINE_DIR.parent.parent.parent))
+# plugins/memory must be on the path too, or `python3 consolidate.py`
+# (this file's own documented usage) dies on `import spine`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def main() -> None:

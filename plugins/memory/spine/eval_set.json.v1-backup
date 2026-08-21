@@ -1,0 +1,59 @@
+{
+  "_about": "Phase 0 retrieval gate. Each case: a question, and key phrases at least one of which must appear in the top-k recall results for the case to pass. Run with eval_run.py. No spine change ships without a before/after run.",
+  "k": 6,
+  "cases": [
+    {
+      "id": "sg-lwix-weighting",
+      "q": "how is the SG-LWIX watch index weighted",
+      "expect_any": ["LWIX", "watch index", "price card", "listings.json"],
+      "note": "Known-failing at baseline: returns 'GTM Second Brain' and 'ETH price'."
+    },
+    {
+      "id": "zo-route-rce",
+      "q": "why was the Zo api/zo public route rewritten",
+      "expect_any": ["RCE", "unauthenticated", "root", "shell", "traversal"]
+    },
+    {
+      "id": "embedder-break",
+      "q": "what silently broke spine semantic search for eight days",
+      "expect_any": ["get_sentence_embedding_dimension", "embedder", "rename", "MiniLM"]
+    },
+    {
+      "id": "canonical-hermes",
+      "q": "which Hermes installation is canonical, the M1 or the one on Zo",
+      "expect_any": ["M1", "canonical", "0.20.0", "deleted"]
+    },
+    {
+      "id": "system-topic",
+      "q": "which Telegram topic is the ops and system broadcast channel",
+      "expect_any": ["topic 11", "#11", "system", "HQ_HermesBoat69"]
+    },
+    {
+      "id": "control-direction",
+      "q": "can Zo call into Claude Code or is control one way",
+      "expect_any": ["one-way", "one way", "never the reverse", "Claude Code calls"]
+    },
+    {
+      "id": "totoapp-rejection",
+      "q": "why did TotoApp get rejected from the App Store",
+      "expect_any": ["age rating", "2.3.6", "rejected"]
+    },
+    {
+      "id": "workout-log-shape",
+      "q": "how are records structured in workout-log.json",
+      "expect_any": ["per exercise", "group by date", "one record"]
+    },
+    {
+      "id": "groq-limit",
+      "q": "why was Groq removed from the fallback providers",
+      "expect_any": ["8K TPM", "8K", "413", "Groq"],
+      "note": "Lives only in MEMORY.md at baseline — expected to fail until orphan recovery."
+    },
+    {
+      "id": "concierge-field-name",
+      "q": "what is the concierge bot field called instead of Trigger",
+      "expect_any": ["Driver", "too aggressive"],
+      "note": "Lives only in MEMORY.md at baseline — expected to fail until orphan recovery."
+    }
+  ]
+}

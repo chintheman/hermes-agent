@@ -272,13 +272,17 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
 
     for row in auto_candidates:
         obs_id, content, obs_type, epistemic, confidence = row
-        # Only mark promoted if the write actually landed. Flipping status on a
-        # failed append strands the row forever: promote only reads 'active' so
-        # it is never retried, and demote can never excise text that was never
-        # written. It also announced promotions to Telegram that did not happen.
-        if not _promote_to_hotcore(obs_id, content, obs_type, config):
+        # Only skip on a genuine failure. Flipping status after a failed append
+        # stranded the row forever (promote reads only 'active', demote cannot
+        # excise text never written) and announced promotions that never
+        # happened. A duplicate still marks promoted: the text IS in the hot
+        # core, so the row is represented there and must become demotable.
+        outcome = _promote_to_hotcore(obs_id, content, obs_type, config)
+        if outcome == "failed":
             continue
         idx.update_status(obs_id, "promoted")
+        if outcome == "duplicate":
+            continue
         promoted += 1
         notified.append(f"[{obs_id[:8]}] ({obs_type}, {epistemic}, conf={confidence:.2f}) {content[:100]}")
 
@@ -295,9 +299,12 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
 
     for row in correction_candidates:
         obs_id, content, obs_type, epistemic, confidence = row
-        if not _promote_to_hotcore(obs_id, content, obs_type, config):
+        outcome = _promote_to_hotcore(obs_id, content, obs_type, config)
+        if outcome == "failed":
             continue
         idx.update_status(obs_id, "promoted")
+        if outcome == "duplicate":
+            continue
         promoted += 1
         notified.append(f"[{obs_id[:8]}] (correction fast-path, conf={confidence:.2f}) {content[:100]}")
 
@@ -368,11 +375,26 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
                 # but the DB still called them promoted -- drift no check sees.
                 # 'demoted' stays searchable (it is in SEARCHABLE_STATUSES) but
                 # is never re-promoted: the promote pass only reads 'active'.
-                for oid in demote_ids:
-                    idx.update_status(oid, "demoted")
-                idx.conn.commit()
-                _write_hotcore_blocks(mem_path, blocks)
-                mem_size = os.path.getsize(mem_path)
+                # Write the file FIRST. If it raises, the rows are still
+                # 'promoted' and next night retries. The reverse order left them
+                # committed as 'demoted' with their text still in the file, and
+                # since demote reads only 'promoted' those blocks became
+                # permanently un-excisable -- the exact stuck-over-budget state
+                # this pass exists to prevent.
+                try:
+                    _write_hotcore_blocks(mem_path, blocks)
+                except Exception as e:  # noqa: BLE001
+                    logger.error("hot-core rewrite failed, leaving %d rows promoted: %s",
+                                 len(demote_ids), e)
+                    report.setdefault("warnings", []).append(
+                        f"MEMORY.md rewrite failed ({e}); {len(demote_ids)} rows left promoted")
+                    demoted = 0
+                    demote_ids = []
+                else:
+                    for oid in demote_ids:
+                        idx.update_status(oid, "demoted")
+                    idx.conn.commit()
+                    mem_size = os.path.getsize(mem_path)
 
 
         # Gate on the state, not on why. The previous version only warned when a
@@ -514,37 +536,40 @@ def _excise_block(blocks: List[str], content: str) -> Optional[List[str]]:
     return None
 
 
-def _promote_to_hotcore(obs_id: str, content: str, obs_type: str, config: SpineConfig) -> bool:
-    """Append an observation to the MEMORY.md hot core, skipping duplicates.
+def _promote_to_hotcore(obs_id: str, content: str, obs_type: str,
+                        config: SpineConfig) -> str:
+    """Append an observation to the MEMORY.md hot core.
 
-    Tags per spec: [R] rule, [C] correction, [F] fact, [W] workflow, [ID] identity.
-    Returns True if the entry was written, False if it was already present or
-    the write failed. Without the duplicate check this function was the growth
-    engine: the demote pass flipped rows back to 'active', which made them
-    eligible for promotion again, and each round appended another copy.
+    Returns "written", "duplicate", or "failed" -- the caller must distinguish
+    them. A plain bool conflated "already there" with "the write blew up", and
+    the caller skipped update_status for both, so a row whose text was already a
+    block stayed 'active' forever, was re-selected every night, and could never
+    be demoted (demote reads only 'promoted').
+
+    Writes through _write_hotcore_blocks rather than appending raw text. A raw
+    append onto a file that already ends in a newline produces "…entry\n\n§\n",
+    which fails memory_tool._detect_external_drift's round-trip check -- and a
+    drifted file makes Hermes's own memory() refuse every mutation. The two
+    writers have to agree on the format, and one serialiser is how you get that.
     """
     mem_path = _hotcore_path()
     entry = _hotcore_entry(content, obs_type)
 
     try:
-        # Same lock as the rewrite path and as memory(): the dedupe check is a
-        # read-then-append, so without it two writers can both see "absent".
+        # Same lock as memory(): the dedupe check is a read-then-write, so
+        # without it two writers can both observe "absent".
         with _hotcore_lock():
-            if entry in _read_hotcore_blocks(mem_path):
+            blocks = _read_hotcore_blocks(mem_path)
+            if entry in blocks:
                 logger.debug("Skipped promoting %s — already in MEMORY.md", obs_id)
-                return False
-            with open(mem_path, "a", encoding="utf-8") as f:
-                f.write(f"\n§\n{entry}\n")
+                return "duplicate"
+            _write_hotcore_blocks(mem_path, blocks + [entry])
         logger.info("Promoted %s to MEMORY.md: %s", obs_id, content[:80])
-        return True
-    except Exception as e:
+        return "written"
+    except Exception as e:  # noqa: BLE001
         logger.error("Failed to promote %s to MEMORY.md: %s", obs_id, e)
-        return False
+        return "failed"
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# Loop 3: Activation Manifest (on_session_start)
-# ═══════════════════════════════════════════════════════════════════════
 
 def build_activation_manifest(config: SpineConfig) -> Dict[str, Any]:
     """Build the session-start activation manifest (spec §5.3).

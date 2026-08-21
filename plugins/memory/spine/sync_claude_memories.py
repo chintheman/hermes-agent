@@ -169,6 +169,12 @@ def main() -> None:
             unchanged += 1
             r["created_at"] = p.get("created_at", r["created_at"])
             r["last_confirmed"] = p.get("last_confirmed", r["last_confirmed"])
+        if p is not None:
+            # Carry the RESOLVED status (patches merged) forward. Every record
+            # is rebuilt with status "active", so without this a demote or a
+            # forget tombstone on this profile was silently reverted on the next
+            # 4-hourly run.
+            r["status"] = p.get("status", r["status"])
     # A file that failed to parse is NOT a deletion. Treating it as one turned
     # "you broke the frontmatter" into "this memory is silently unretrievable".
     skipped_ids = {stable_id(f) for f in skipped}
@@ -197,6 +203,26 @@ def main() -> None:
     writer = JSONLWriter(out)
     tmp = out + ".tmp"
     with writer._lock():
+        # Re-read under the lock and re-apply anything that landed between the
+        # first read and now. Locking only the write left the original race open.
+        if os.path.exists(out):
+            late = {}
+            for line in open(out, encoding="utf-8"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "patch" in d:
+                    late.setdefault(d["id"], []).append(d["patch"])
+            by_id = {r["id"]: r for r in recs}
+            for oid, plist in late.items():
+                if oid in by_id:
+                    for patch in plist:
+                        if "status" in patch:
+                            by_id[oid]["status"] = patch["status"]
         with open(tmp, "w", encoding="utf-8") as f:
             for r in recs:
                 f.write(json.dumps(r, sort_keys=True) + "\n")

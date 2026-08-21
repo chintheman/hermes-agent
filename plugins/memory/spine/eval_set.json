@@ -1,5 +1,5 @@
 {
-  "_about": "Spine retrieval gate. Two sections. SINGLE-HOP cases pass when any expect_any phrase appears in top-k. MULTI-HOP cases pass only when EVERY expect_all phrase appears AND they arrive from at least min_sources distinct documents -- without that second constraint one large memory containing all the phrases would fake a multi-hop pass. Sections are scored separately: averaging them hides which capability moved. No spine change ships without a before/after run. Needles must be specific enough to fail on an unrelated query: short unanchored substrings like 'rce' match 'source' and 'force'.",
+  "_about": "Spine retrieval gate, three sections, scored separately because averaging them hides which capability moved. SINGLE-HOP: any expect_any phrase appears in top-k. CONJUNCTIVE: every expect_all phrase appears — a compound question must surface all its parts, wherever they live. MULTI-HOP: every phrase appears AND they come from at least min_sources documents each contributing a phrase the others do not. A case only belongs in MULTI-HOP if no single document in the corpus answers it; `eval_run.py --validate` enforces that, because 11 of 12 cases were silently mislabelled once. Needles must be specific enough to fail on an unrelated query: short unanchored substrings like 'rce' match 'source'.",
   "k": 20,
   "cases": [
     {
@@ -187,8 +187,7 @@
         "mcp first",
         "unauthenticated"
       ],
-      "min_sources": 2,
-      "hop": "multi"
+      "hop": "conj"
     },
     {
       "id": "mh-rebuild-unsafe",
@@ -198,8 +197,7 @@
         "jsonl",
         "promote"
       ],
-      "min_sources": 2,
-      "hop": "multi"
+      "hop": "conj"
     },
     {
       "id": "mh-blocked-cli",
@@ -208,8 +206,7 @@
         "hermes chat",
         "classifier"
       ],
-      "min_sources": 2,
-      "hop": "multi"
+      "hop": "conj"
     },
     {
       "id": "mh-secrets-route",
@@ -218,8 +215,7 @@
         "keychain",
         "classifier"
       ],
-      "min_sources": 2,
-      "hop": "multi"
+      "hop": "conj"
     },
     {
       "id": "mh-silent-failure",
@@ -228,8 +224,7 @@
         "embedder",
         "heartbeat"
       ],
-      "min_sources": 2,
-      "hop": "multi"
+      "hop": "conj"
     },
     {
       "id": "mh-who-drives-who",
@@ -239,8 +234,7 @@
         "zo",
         "initiate"
       ],
-      "min_sources": 2,
-      "hop": "multi"
+      "hop": "conj"
     },
     {
       "id": "mh-output-rules",
@@ -260,8 +254,7 @@
         "consolidation",
         "promote"
       ],
-      "min_sources": 2,
-      "hop": "multi"
+      "hop": "conj"
     },
     {
       "id": "mh-cron-traps",
@@ -270,8 +263,7 @@
         "30m",
         "one-shot"
       ],
-      "min_sources": 2,
-      "hop": "multi"
+      "hop": "conj"
     },
     {
       "id": "mh-memory-sync-latency",
@@ -280,9 +272,8 @@
         "sync",
         "4 hours"
       ],
-      "min_sources": 2,
       "note": "Added 2026-08-20. Expected to FAIL until the sync cron has run once after the memory file was written -- it measures the freshness gap on purpose.",
-      "hop": "multi"
+      "hop": "conj"
     },
     {
       "id": "mh-verification-discipline",
@@ -291,8 +282,7 @@
         "negative control",
         "verify"
       ],
-      "min_sources": 2,
-      "hop": "multi"
+      "hop": "conj"
     },
     {
       "id": "mh-deploy-truth",
@@ -301,8 +291,7 @@
         "served",
         "worktree"
       ],
-      "min_sources": 2,
-      "hop": "multi"
+      "hop": "conj"
     }
   ]
 }
