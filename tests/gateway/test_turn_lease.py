@@ -200,7 +200,12 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
     runner._post_turn_goal_continuation = AsyncMock()
 
     try:
-        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=1)
+        # Safety net only: the lease budget (0.02s) is the assertion under
+        # test. 5s matches HERMES_AGENT_TIMEOUT, so a broken lease that falls
+        # through to the agent inactivity wait still times out and fails the
+        # test — but a healthy fast-reject is not at the mercy of CI scheduler
+        # load starving a 1s outer window (flake: TimeoutError in slice 7/12).
+        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=5)
     finally:
         assert runner._turn_leases.release(holder) is True
 
