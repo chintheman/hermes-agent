@@ -20,7 +20,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _model: Optional[object] = None
-_model_name: str = "all-MiniLM-L6-v2"
+_model_name: str = "all-mpnet-base-v2"
 _available: Optional[bool] = None
 
 
