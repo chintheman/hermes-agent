@@ -133,7 +133,6 @@ def build_index(observations: List[Dict[str, Any]], db_path: str, dry_run: bool 
     Returns stats: {observations: N, episodes: N, wiki_chunks: N}
     """
     from spine.index import MemoryIndex
-    from spine import index as index_mod
 
     episodes = episodes or []
     stats: Dict[str, int] = {"observations": 0, "episodes": 0, "wiki_chunks": 0}
@@ -157,7 +156,14 @@ def build_index(observations: List[Dict[str, Any]], db_path: str, dry_run: bool 
     # without this a legitimate model swap leaves the store permanently
     # mislabelled and check_embedder FAILs every night with no way back.
     stored_dim = idx.get_embedding_dim()
-    live_dim = index_mod.embedding_dim() if hasattr(index_mod, "embedding_dim") else stored_dim
+    # From the EMBEDDER, not index.embedding_dim(): that resolves store-first, so
+    # comparing it against the store compared the store to itself and the branch
+    # below was unreachable -- set_embedding_dim() had no caller at all.
+    from spine.embedder import get_embedding_dim as _live_dim
+    try:
+        live_dim = _live_dim()
+    except Exception:  # noqa: BLE001 — embedder down; leave the stamp alone
+        live_dim = stored_dim
     if live_dim and live_dim != stored_dim:
         print(f"  embedding width {stored_dim} -> {live_dim}; restamping dim_meta")
         idx.set_embedding_dim(live_dim)

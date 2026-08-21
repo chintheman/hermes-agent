@@ -165,7 +165,13 @@ def _get_writer(config: SpineConfig, profile: str = "agent:main") -> JSONLWriter
     "*.jsonl" and the record would be invisible to every rebuild.
     """
     if profile in ("*", "all"):
-        raise ValueError("refusing to write to a wildcard profile; resolve it first")
+        # Callers that only READ (explain) pass the wildcard scope through, and
+        # SpinePlugin.handle_tool_call has no try/except, so raising here escaped
+        # the dispatcher. Read paths get the default log; write paths must resolve
+        # the concrete profile first, which handle_forget now does explicitly.
+        return JSONLWriter(os.path.join(
+            os.path.expanduser(config.canonical_root), "observations",
+            "agent:main.jsonl"))
     obs_dir = os.path.join(config.canonical_root, "observations")
     return JSONLWriter(os.path.join(obs_dir, f"{profile}.jsonl"))
 
@@ -485,12 +491,11 @@ def handle_forget(args: Dict[str, Any], config: SpineConfig) -> str:
         profile = row[2] or "agent:main"
         writer = _get_writer(config, profile)
 
-        # Delete from index
-        idx.delete_observation(obs_id)
-        idx.conn.commit()
-        idx.close()
-
-        # Remove from JSONL (mark as deleted — append a tombstone)
+        # Tombstone the SOURCE OF TRUTH first. The reverse order deleted the row
+        # from the derived index and, if the append then failed, left it 'active'
+        # in the canonical JSONL -- so the next rebuild-index.py resurrected a
+        # memory the user had explicitly asked to forget. Demote already got this
+        # ordering right; this path had it inverted.
         now = _now_iso()
         tombstone = {
             "id": obs_id,
@@ -499,11 +504,19 @@ def handle_forget(args: Dict[str, Any], config: SpineConfig) -> str:
         }
         writer.append(tombstone)
 
+        # Only now drop it from the derived index.
+        idx.delete_observation(obs_id)
+        idx.conn.commit()
+        idx.close()
+
         # Git commit the removal (spec §4.4)
         import subprocess as _subprocess
         import os as _os
+        # Same filename the writer actually uses. This had `profile.replace(':','_')`,
+        # producing observations/agent_main.jsonl, which has never existed -- so
+        # the exists() check was always False and no forget was ever committed.
         jsonl_path = _os.path.expanduser(
-            _os.path.join(config.canonical_root, "observations", f"{profile.replace(':', '_')}.jsonl")
+            _os.path.join(config.canonical_root, "observations", f"{profile}.jsonl")
         )
         if _os.path.exists(jsonl_path):
             try:

@@ -18,6 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))))
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
+# spine/ itself: eval_run.py and sync_claude_memories.py are scripts, not part
+# of the package, so they import as top-level modules.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from spine import loops  # noqa: E402
 
@@ -54,6 +57,24 @@ def test_promote_is_tristate():
     assert loops._promote_to_hotcore("a", "brand new", "fact", None) == "duplicate"
     loops.HOTCORE_PATH = "/nonexistent-dir-xyz/MEMORY.md"
     assert loops._promote_to_hotcore("a", "x", "fact", None) == "failed"
+    os.remove(f)
+
+
+def test_promote_dedupe_is_tag_insensitive():
+    """A re-tagged copy of an existing block must not append a second one.
+
+    sync_hotcore re-remembers hot-core blocks as type "fact", so "[W] x" comes
+    back as "[F] x". A full-string comparison never matched and the file grew a
+    duplicate every run -- a growth engine inside the prompt injected on every
+    call.
+    """
+    f = tempfile.mktemp(suffix=".md")
+    _hotcore(f, "[W] Chin prefers short replies\n§\n[R] never use em dashes\n")
+    before = len(loops._read_hotcore_blocks(f))
+    # same bodies, different type -> different tag
+    assert loops._promote_to_hotcore("a", "Chin prefers short replies", "fact", None) == "duplicate"
+    assert loops._promote_to_hotcore("b", "never use em dashes", "fact", None) == "duplicate"
+    assert len(loops._read_hotcore_blocks(f)) == before, "dedupe appended a re-tagged copy"
     os.remove(f)
 
 
@@ -97,45 +118,55 @@ def test_hotcore_lock_serialises_a_concurrent_writer():
 
 # ── eval scorer ───────────────────────────────────────────────────────
 
-def _distinct(per_doc, needles):
-    covered, distinct = set(), 0
-    for owned in sorted(per_doc, key=len, reverse=True):
-        fresh = owned - covered
-        if fresh:
-            covered |= fresh
-            distinct += 1
-    return distinct
+def _judge(case, docs):
+    """Score through eval_run's REAL judge(), not a reimplementation."""
+    import eval_run
+    return eval_run.judge(case, [{"content": d} for d in docs])
 
 
 def test_min_sources_rejects_one_doc_holding_every_needle():
-    """Ascending sort counted {a} then {a,b} as two contributors."""
-    assert _distinct([{"a", "b"}, {"a"}], {"a", "b"}) == 1
-    assert _distinct([{"a"}, {"b"}], {"a", "b"}) == 2
-    assert _distinct([{"a", "b"}, {"c"}], {"a", "b", "c"}) == 2
+    case = {"id": "t", "q": "q", "hop": "multi",
+            "expect_all": ["alpha", "beta"], "min_sources": 2}
+    r = _judge(case, ["alpha and beta together", "alpha only"])
+    assert r["n_sources"] == 1, f"expected 1 contributor, got {r['n_sources']}"
+    assert not r["passed"]
+
+
+def test_min_sources_accepts_two_genuine_contributors():
+    case = {"id": "t", "q": "q", "hop": "multi",
+            "expect_all": ["alpha", "beta"], "min_sources": 2}
+    r = _judge(case, ["alpha only", "beta only"])
+    assert r["n_sources"] == 2 and r["passed"]
+
+
+def test_conj_ignores_source_count_but_still_needs_every_needle():
+    case = {"id": "t", "q": "q", "hop": "conj", "expect_all": ["alpha", "beta"]}
+    assert _judge(case, ["alpha and beta"])["passed"]
+    assert not _judge(case, ["alpha only"])["passed"]
 
 
 # ── canonical store ───────────────────────────────────────────────────
 
-def test_patch_lines_resolve_like_a_rebuild_would():
-    """check_divergence read top-level status and missed 45% of the store."""
-    recs = [{"id": "x", "status": "active"}, {"id": "x", "patch": {"status": "demoted"}}]
-    on_disk, patches = {}, {}
-    for d in recs:
-        (patches.setdefault(d["id"], []).append(d["patch"]) if "patch" in d
-         else on_disk.__setitem__(d["id"], d.get("status")))
-    for oid, plist in patches.items():
-        for p in plist:
-            if "status" in p:
-                on_disk[oid] = p["status"]
-    assert on_disk["x"] == "demoted"
+def test_sync_carries_status_and_age_forward():
+    """Records are rebuilt as 'active'; a demote must not be reverted."""
+    import sync_claude_memories as sync
+    fresh = {"content": "same", "status": "active",
+             "created_at": "2026-08-01", "last_confirmed": "2026-08-01"}
+    prior = {"content": "same", "status": "demoted",
+             "created_at": "2026-01-01", "last_confirmed": "2026-02-02"}
+    assert sync.merge_prior(dict(fresh), None) == "added"
+    r = dict(fresh)
+    assert sync.merge_prior(r, prior) == "unchanged"
+    assert r["status"] == "demoted", "status reverted to active"
+    assert r["created_at"] == "2026-01-01", "age was reset"
+    r2 = dict(fresh)
+    assert sync.merge_prior(r2, dict(prior, content="different")) == "changed"
+    assert r2["status"] == "demoted" and r2["created_at"] == "2026-01-01"
 
 
-def test_wildcard_profile_is_never_written_to():
-    """_get_writer('*') would create a literal '*.jsonl' invisible to rebuilds."""
+def test_wildcard_profile_never_produces_a_star_filename():
+    """A literal '*.jsonl' would be invisible to every rebuild."""
     from spine.tools import _get_writer
     from spine.config import SpineConfig
-    try:
-        _get_writer(SpineConfig(), "*")
-    except ValueError:
-        return
-    raise AssertionError("_get_writer accepted a wildcard profile")
+    w = _get_writer(SpineConfig(canonical_root=tempfile.mkdtemp()), "*")
+    assert "*" not in str(w._path), f"wildcard leaked into {w._path}"

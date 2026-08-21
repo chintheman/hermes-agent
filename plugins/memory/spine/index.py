@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # so swapping models cannot leave a stale 384 behind.
 _DEFAULT_EMBEDDING_DIM = 384
 _embedding_dim: Optional[int] = None
+_dim_probe_failed = False
 
 
 def embedding_dim() -> int:
@@ -48,26 +49,34 @@ def embedding_dim() -> int:
     width that matters is the width of the bytes already on disk. Only if the
     store is silent do we ask the embedder.
     """
-    global _embedding_dim
+    global _embedding_dim, _dim_probe_failed
     if _embedding_dim is not None:
         return _embedding_dim
     # Store first, as documented: the width that matters is the width of the
-    # bytes already on disk, and reading it costs no model load. Falling to the
-    # embedder here also meant max_bytes_per_vec() retried a failed model load
-    # once per vector inside _stack().
-    try:
-        import sqlite3 as _sq
-        from .config import load_spine_config
-        _c = _sq.connect(os.path.expanduser(load_spine_config().db))
-        _c.execute("PRAGMA query_only = ON")
-        _row = _c.execute(
-            "SELECT value FROM dim_meta WHERE key='embedding_dim'").fetchone()
-        _c.close()
-        if _row:
-            _embedding_dim = int(_row[0])
-            return _embedding_dim
-    except Exception:  # noqa: BLE001 — no store yet, or unreadable
-        pass
+    # bytes already on disk. Read-only URI so a missing store is NOT created --
+    # a plain connect() materialised a zero-byte memory.db. Closed in finally:
+    # the previous version skipped close() whenever the SELECT raised, and this
+    # is called once per vector, so it leaked a descriptor per row.
+    if not _dim_probe_failed:
+        con = None
+        try:
+            import sqlite3 as _sq
+            from .config import load_spine_config
+            db = os.path.expanduser(load_spine_config().db)
+            if os.path.exists(db):
+                con = _sq.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+                row = con.execute(
+                    "SELECT value FROM dim_meta WHERE key='embedding_dim'").fetchone()
+                if row:
+                    _embedding_dim = int(row[0])
+                    return _embedding_dim
+        except Exception:  # noqa: BLE001 — no store, no table, or locked
+            pass
+        finally:
+            if con is not None:
+                con.close()
+        # Remember the miss. Without this the probe re-ran per vector.
+        _dim_probe_failed = True
     try:
         from .embedder import get_embedding_dim
         d = get_embedding_dim()

@@ -280,9 +280,16 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
         outcome = _promote_to_hotcore(obs_id, content, obs_type, config)
         if outcome == "failed":
             continue
-        idx.update_status(obs_id, "promoted")
         if outcome == "duplicate":
+            # Another row already owns that block, and _excise_block removes
+            # exactly one, so marking this 'promoted' stranded it forever:
+            # never demotable (no block to match) and never re-promotable
+            # (promote reads only 'active'). 'demoted' is the honest state --
+            # represented in the hot core by another row, still searchable,
+            # not retried every night.
+            idx.update_status(obs_id, "demoted")
             continue
+        idx.update_status(obs_id, "promoted")
         promoted += 1
         notified.append(f"[{obs_id[:8]}] ({obs_type}, {epistemic}, conf={confidence:.2f}) {content[:100]}")
 
@@ -302,9 +309,16 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
         outcome = _promote_to_hotcore(obs_id, content, obs_type, config)
         if outcome == "failed":
             continue
-        idx.update_status(obs_id, "promoted")
         if outcome == "duplicate":
+            # Another row already owns that block, and _excise_block removes
+            # exactly one, so marking this 'promoted' stranded it forever:
+            # never demotable (no block to match) and never re-promotable
+            # (promote reads only 'active'). 'demoted' is the honest state --
+            # represented in the hot core by another row, still searchable,
+            # not retried every night.
+            idx.update_status(obs_id, "demoted")
             continue
+        idx.update_status(obs_id, "promoted")
         promoted += 1
         notified.append(f"[{obs_id[:8]}] (correction fast-path, conf={confidence:.2f}) {content[:100]}")
 
@@ -390,6 +404,12 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
                         f"MEMORY.md rewrite failed ({e}); {len(demote_ids)} rows left promoted")
                     demoted = 0
                     demote_ids = []
+                    # Re-read the truth. mem_size still held the value the
+                    # excise loop simulated down to, so the report claimed a
+                    # shrink that never happened AND the figure fell under the
+                    # budget, suppressing the over-budget alarm on the exact
+                    # path this branch introduces.
+                    mem_size = os.path.getsize(mem_path)
                 else:
                     for oid in demote_ids:
                         idx.update_status(oid, "demoted")
@@ -560,7 +580,12 @@ def _promote_to_hotcore(obs_id: str, content: str, obs_type: str,
         # without it two writers can both observe "absent".
         with _hotcore_lock():
             blocks = _read_hotcore_blocks(mem_path)
-            if entry in blocks:
+            # Compare tag-stripped bodies. Comparing the full "[F] body" string
+            # meant sync_hotcore's re-tagged copies ("[W] x" -> "[F] x") never
+            # matched and appended a second block: a duplication engine inside
+            # the file injected into every system prompt. Everything else in the
+            # system (excise, coverage) already compares bodies.
+            if _block_body(entry) in {_block_body(b) for b in blocks}:
                 logger.debug("Skipped promoting %s — already in MEMORY.md", obs_id)
                 return "duplicate"
             _write_hotcore_blocks(mem_path, blocks + [entry])

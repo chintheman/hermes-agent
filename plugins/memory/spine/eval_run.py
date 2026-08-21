@@ -32,7 +32,44 @@ DB = os.path.expanduser("~/.hermes/memory.db")
 EVAL = os.path.join(HERE, "eval_set.json")
 
 
-def run(profile: str = "agent:main") -> Dict[str, Any]:
+def judge(case: Dict[str, Any], hits: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Score one case against one result list.
+
+    Module-level and importable ON PURPOSE: the first regression tests
+    reimplemented this inline, so reverting the greedy sort left them green.
+    """
+    docs = [(h.get("content") or "").lower() for h in hits]
+    blob = "\n".join(docs)
+    hop = case.get("hop", "single")
+
+    if hop in ("multi", "conj"):
+        needles = case["expect_all"]
+        matched = [n for n in needles if n.lower() in blob]
+        # Count documents that each contribute a needle the OTHERS do not.
+        per_doc = [{n for n in needles if n.lower() in d} for d in docs]
+        covered, distinct = set(), 0
+        # DESCENDING. Greedy set-cover takes the largest set first; ascending
+        # counts {a} then {a,b} as two contributors, so one document holding
+        # every needle plus one unrelated mention still passed min_sources=2.
+        for owned in sorted(per_doc, key=len, reverse=True):
+            fresh = owned - covered
+            if fresh:
+                covered |= fresh
+                distinct += 1
+        need = case.get("min_sources", 2) if hop == "multi" else 0
+        passed = len(matched) == len(needles) and distinct >= need
+        n_sources = distinct
+    else:
+        matched = [p for p in case["expect_any"] if p.lower() in blob]
+        passed = bool(matched)
+        n_sources = sum(1 for d in docs
+                        if any(p.lower() in d for p in case["expect_any"]))
+        need = 0
+    return {"hop": hop, "passed": passed, "matched": matched,
+            "n_sources": n_sources, "need_sources": need if hop == "multi" else 0}
+
+
+def run(profile: str = "*") -> Dict[str, Any]:
     spec = json.load(open(EVAL, encoding="utf-8"))
     k = spec.get("k", 6)
     cases = spec["cases"]
@@ -53,50 +90,16 @@ def run(profile: str = "agent:main") -> Dict[str, Any]:
         hits = idx.search_hybrid(q, qvec or None, profile=profile, k=k)
         t_search = time.perf_counter() - t0
 
-        docs = [(h.get("content") or "").lower() for h in hits]
-        blob = "\n".join(docs)
-        hop = case.get("hop", "single")
-
-        if hop in ("multi", "conj"):
-            # Every needle must appear, AND they must arrive from enough distinct
-            # documents. Without the source count, one memory containing all the
-            # phrases would pass a test meant to prove retrieval CONNECTED
-            # separate memories.
-            needles = case["expect_all"]
-            matched = [n for n in needles if n.lower() in blob]
-            # Count documents that each contribute a needle the OTHERS do not.
-            # Counting docs containing *any* needle let one document holding
-            # every needle, plus one unrelated document mentioning any of them,
-            # satisfy min_sources -- exactly the case this is meant to reject.
-            per_doc = [{n for n in needles if n.lower() in d} for d in docs]
-            covered, distinct = set(), 0
-            # DESCENDING. Greedy set-cover takes the largest set first; ascending
-            # counts {a} then {a,b} as two contributors, so one document holding
-            # every needle plus one unrelated mention still passed min_sources=2
-            # -- the exact case this rejects. Verified: 8 of 12 multi-hop cases
-            # passed only because of the wrong order.
-            for owned in sorted(per_doc, key=len, reverse=True):
-                fresh = owned - covered
-                if fresh:
-                    covered |= fresh
-                    distinct += 1
-            need = case.get("min_sources", 2) if hop == "multi" else 0
-            passed = len(matched) == len(needles) and distinct >= need
-            n_sources = distinct
-        else:
-            matched = [p for p in case["expect_any"] if p.lower() in blob]
-            passed = bool(matched)
-            n_sources = sum(1 for d in docs
-                            if any(p.lower() in d for p in case["expect_any"]))
+        verdict = judge(case, hits)
 
         results.append({
             "id": case["id"],
             "q": q,
-            "hop": hop,
-            "passed": passed,
-            "matched": matched,
-            "n_sources": n_sources,
-            "need_sources": case.get("min_sources", 0) if hop == "multi" else 0,
+            "hop": verdict["hop"],
+            "passed": verdict["passed"],
+            "matched": verdict["matched"],
+            "n_sources": verdict["n_sources"],
+            "need_sources": verdict["need_sources"],
             "search_ms": round(t_search * 1000, 1),
             "embed_ms": round(t_embed * 1000, 1),
             "n_hits": len(hits),
@@ -209,7 +212,10 @@ def compare(new: Dict[str, Any], old_path: str) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--profile", default="agent:main")
+    # "*" to match check_eval, which always runs run("*"). With agent:main here,
+    # the documented `--save` refresh wrote an agent:main baseline (14/29) that a
+    # "*" run (29/29) can never fall below, permanently disabling the gate.
+    ap.add_argument("--profile", default="*")
     ap.add_argument("--validate", action="store_true",
                     help="check every multi-hop case really needs >1 document, then exit")
     ap.add_argument("--save")

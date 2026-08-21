@@ -78,6 +78,25 @@ def parse(path: str):
     }
 
 
+def merge_prior(rec, prior):
+    """Fold a previous record into a freshly built one; returns the change state.
+
+    Extracted so it is testable. Two things must survive a rebuild: `created_at`
+    (otherwise every sync resets the age of the whole corpus and hands the
+    recency scorer a store that looks brand new) and `status` (every record is
+    rebuilt as "active", so a demote or a forget tombstone was reverted within
+    four hours).
+    """
+    if prior is None:
+        return "added"
+    rec["created_at"] = prior.get("created_at", rec["created_at"])
+    rec["status"] = prior.get("status", rec["status"])
+    if prior.get("content") != rec["content"]:
+        return "changed"
+    rec["last_confirmed"] = prior.get("last_confirmed", rec["last_confirmed"])
+    return "unchanged"
+
+
 def build_records(now_iso: str):
     if not os.path.isdir(MEM_DIR):
         sys.exit(f"memory dir not found: {MEM_DIR}")
@@ -160,21 +179,13 @@ def main() -> None:
     added = changed = unchanged = 0
     for r in recs:
         p = prior.get(r["id"])
-        if p is None:
+        state = merge_prior(r, p)
+        if state == "added":
             added += 1
-        elif p.get("content") != r["content"]:
+        elif state == "changed":
             changed += 1
-            r["created_at"] = p.get("created_at", r["created_at"])
         else:
             unchanged += 1
-            r["created_at"] = p.get("created_at", r["created_at"])
-            r["last_confirmed"] = p.get("last_confirmed", r["last_confirmed"])
-        if p is not None:
-            # Carry the RESOLVED status (patches merged) forward. Every record
-            # is rebuilt with status "active", so without this a demote or a
-            # forget tombstone on this profile was silently reverted on the next
-            # 4-hourly run.
-            r["status"] = p.get("status", r["status"])
     # A file that failed to parse is NOT a deletion. Treating it as one turned
     # "you broke the frontmatter" into "this memory is silently unretrievable".
     skipped_ids = {stable_id(f) for f in skipped}
@@ -206,7 +217,7 @@ def main() -> None:
         # Re-read under the lock and re-apply anything that landed between the
         # first read and now. Locking only the write left the original race open.
         if os.path.exists(out):
-            late = {}
+            late_base, late_patch = {}, {}
             for line in open(out, encoding="utf-8"):
                 line = line.strip()
                 if not line:
@@ -216,13 +227,22 @@ def main() -> None:
                 except json.JSONDecodeError:
                     continue
                 if "patch" in d:
-                    late.setdefault(d["id"], []).append(d["patch"])
+                    late_patch.setdefault(d["id"], []).append(d["patch"])
+                else:
+                    late_base[d["id"]] = d
             by_id = {r["id"]: r for r in recs}
-            for oid, plist in late.items():
+            for oid, plist in late_patch.items():
                 if oid in by_id:
                     for patch in plist:
                         if "status" in patch:
                             by_id[oid]["status"] = patch["status"]
+            # A whole record appended between the first (unlocked) read and this
+            # lock would otherwise be erased by the os.replace below. The rebuild
+            # is derived from the .md files, so anything else in this log is
+            # foreign and must be carried through verbatim.
+            for oid, rec in late_base.items():
+                if oid not in by_id and rec.get("profile") == PROFILE:
+                    recs.append(rec)
         with open(tmp, "w", encoding="utf-8") as f:
             for r in recs:
                 f.write(json.dumps(r, sort_keys=True) + "\n")

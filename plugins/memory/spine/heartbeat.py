@@ -256,7 +256,15 @@ def check_eval(cfg):
     try:
         sys.path.insert(0, here)
         import eval_run
-        now = eval_run.run("*")
+        # Compare like with like: a baseline saved under a different
+        # profile is not a valid floor.
+        # Validate the SET before trusting the score. A multi-hop case answerable
+        # from one document scores retrieval that never had to connect anything;
+        # 11 of 12 were silently in that state once. --validate was otherwise a
+        # flag a human had to remember to type.
+        if eval_run.validate() != 0:
+            return FAIL, "eval set has mislabelled multi-hop cases (see --validate)"
+        now = eval_run.run(base.get("profile", "*"))
     except Exception as e:  # noqa: BLE001
         # SKIP is for ABSENT evidence. A harness that raises is a broken tool,
         # and this is the regression gate -- the one check that must not be able
