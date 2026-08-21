@@ -1045,7 +1045,7 @@ def _api_access_log_line(request, status: int, t0: float, unhandled: bool = Fals
         if unhandled:
             entry["unhandled_exception"] = True
         _rotate_api_access_log_if_needed()
-        with open(_ACCESS_LOG_PATH, "a") as f:
+        with open(_ACCESS_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass

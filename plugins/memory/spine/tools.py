@@ -744,7 +744,7 @@ def _scrub_session_db(obs_id: str, content: str, config: SpineConfig) -> int:
 
         existing = []
         if scrub_path.exists():
-            with open(scrub_path, "r") as f:
+            with open(scrub_path, "r", encoding="utf-8") as f:
                 try:
                     existing = json.load(f)
                 except json.JSONDecodeError:
@@ -758,7 +758,7 @@ def _scrub_session_db(obs_id: str, content: str, config: SpineConfig) -> int:
             "matches": matches,
         })
 
-        with open(scrub_path, "w") as f:
+        with open(scrub_path, "w", encoding="utf-8") as f:
             json.dump(existing, f, indent=2, ensure_ascii=False)
 
         return len(matches)

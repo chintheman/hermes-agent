@@ -67,10 +67,10 @@ def test_promote_keeps_the_file_round_trippable():
     """A raw append produced '\\n\\n§\\n', which makes memory() refuse ALL writes."""
     f = tempfile.mktemp(suffix=".md")
     _hotcore(f, "[F] alpha\n§\n[F] beta\n")
-    assert _round_trips(open(f).read())
+    assert _round_trips(open(f, encoding="utf-8").read())
     for i in range(3):
         assert loops._promote_to_hotcore(f"id{i}", f"entry {i}", "fact", None) == "written"
-        assert _round_trips(open(f).read()), f"drifted after promote {i}"
+        assert _round_trips(open(f, encoding="utf-8").read()), f"drifted after promote {i}"
     os.remove(f)
 
 
@@ -133,7 +133,7 @@ def test_hotcore_lock_serialises_a_concurrent_writer():
 
     t1, t2 = threading.Thread(target=rewriter), threading.Thread(target=appender)
     t1.start(); t2.start(); t1.join(); t2.join()
-    body = open(f).read()
+    body = open(f, encoding="utf-8").read()
     assert order.index("rewrite:done") < order.index("append:acquired")
     assert "concurrent" in body, "concurrent write was destroyed"
     assert "beta" not in body, "excision did not happen"
@@ -235,7 +235,7 @@ def _sync_fixture(files):
     for name, ok in files.items():
         body = (f"---\nname: {name}\ndescription: d\nmetadata:\n  type: project\n"
                 f"---\n\nbody of {name}\n") if ok else "BROKEN NO FRONTMATTER\n"
-        open(os.path.join(md, f"{name}.md"), "w").write(body)
+        open(os.path.join(md, f"{name}.md"), "w", encoding="utf-8").write(body)
     sync.MEM_DIR = md
     return sync
 
@@ -254,7 +254,7 @@ def test_deleted_file_is_dropped_but_unparseable_file_is_kept():
 
     # bravo deleted, charlie's frontmatter broken
     os.remove(os.path.join(sync.MEM_DIR, "bravo.md"))
-    open(os.path.join(sync.MEM_DIR, "charlie.md"), "w").write("BROKEN\n")
+    open(os.path.join(sync.MEM_DIR, "charlie.md"), "w", encoding="utf-8").write("BROKEN\n")
     recs2, skipped2 = sync.build_records("2026-01-02T00:00:00+00:00")
     assert skipped2 == ["charlie.md"]
 
@@ -296,14 +296,14 @@ def test_born_broken_file_does_not_inflate_the_expected_row_count():
     assert sync.expected_row_count(prior, recs, skipped) == 2
 
     # a brand-new broken file: no prior record, so no row is ever created
-    open(os.path.join(sync.MEM_DIR, "delta.md"), "w").write("BROKEN\n")
+    open(os.path.join(sync.MEM_DIR, "delta.md"), "w", encoding="utf-8").write("BROKEN\n")
     recs2, skipped2 = sync.build_records("2026-01-02T00:00:00+00:00")
     assert skipped2 == ["delta.md"]
     assert sync.expected_row_count(prior, recs2, skipped2) == 2, \
         "a file that never parsed must not be counted"
 
     # a file that HAD parsed and is now broken keeps its row, so it IS counted
-    open(os.path.join(sync.MEM_DIR, "bravo.md"), "w").write("BROKEN\n")
+    open(os.path.join(sync.MEM_DIR, "bravo.md"), "w", encoding="utf-8").write("BROKEN\n")
     recs3, skipped3 = sync.build_records("2026-01-03T00:00:00+00:00")
     assert sync.expected_row_count(prior, recs3, skipped3) == 2
 

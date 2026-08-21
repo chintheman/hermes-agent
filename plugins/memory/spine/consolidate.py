@@ -54,7 +54,7 @@ def main() -> None:
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     report_path = report_dir / f"consolidation-{date_str}.json"
 
-    with open(report_path, "w") as f:
+    with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
     print(f"\nReport saved: {report_path}")
