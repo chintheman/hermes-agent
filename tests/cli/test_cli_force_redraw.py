@@ -426,3 +426,23 @@ class TestFocusRegainRedraw:
         bare_cli._schedule_focus_regain_redraw(min_interval=0.0)
 
         assert calls == ["redraw", "redraw"]
+
+    def test_focus_regain_redraw_fires_on_fresh_instance_with_low_clock(
+        self, bare_cli, monkeypatch
+    ):
+        """A never-redrawn CLI is always eligible for the first redraw.
+
+        Regression: the rate limiter defaulted ``_last_focus_regain_redraw`` to
+        ``0.0``, so on a process younger than ``min_interval`` (a freshly-booted
+        CI VM, where ``time.monotonic()`` < 60) the FIRST focus-in was silently
+        suppressed and the test saw zero redraws — an intermittent red that cost
+        multiple CI runs to diagnose. A ``None`` sentinel keeps the suppression
+        semantics for repeat calls while making the first call unconditional.
+        """
+        calls = []
+        bare_cli._force_full_redraw = lambda: calls.append("redraw")
+        monkeypatch.setattr(cli_mod.time, "monotonic", lambda: 0.5)
+
+        bare_cli._schedule_focus_regain_redraw()  # min_interval=1.0 default
+
+        assert calls == ["redraw"]

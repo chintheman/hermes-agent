@@ -250,6 +250,29 @@ def test_coding_prompt_preserves_legacy_workspace_order(monkeypatch):
     assert agent._cached_system_prompt_static == "\n\n".join(expected.split("\n\n")[:4])
 
 
+class TestAdhdOutputRulesGuidance:
+    """ADHD_OUTPUT_RULES_GUIDANCE is default-on and broadcast-suppressed.
+
+    The pinning test above opts out via ``_adhd_output_rules=False``; these
+    tests cover the two production halves of the gate at
+    ``system_prompt.build_system_prompt_parts``: the attribute-absent default
+    (included) and ``_output_style == "broadcast"`` (suppressed).
+    """
+
+    def test_included_when_attribute_absent(self):
+        """Default (attribute absent) → getattr(..., True) → block present."""
+        agent = _make_agent()
+        delattr(agent, "_adhd_output_rules")
+        stable = _stable_prompt(agent)
+        assert "# ADHD Output Rules" in stable
+
+    def test_suppressed_when_output_style_broadcast(self):
+        """output_style: broadcast opts out even when rules would apply."""
+        agent = _make_agent(_adhd_output_rules=True, _output_style="broadcast")
+        stable = _stable_prompt(agent)
+        assert "# ADHD Output Rules" not in stable
+
+
 class TestTelegramRichMessagesHint:
     """Verify that TELEGRAM_RICH_MESSAGES_HINT is conditionally included."""
 

@@ -5524,7 +5524,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         if getattr(self, "_resize_recovery_pending", False):
             return
         now = time.monotonic()
-        if hasattr(self, "_app") and self._app and (now - getattr(self, "_last_invalidate", 0.0)) >= min_interval:
+        last = getattr(self, "_last_invalidate", None)
+        if hasattr(self, "_app") and self._app and (last is None or (now - last) >= min_interval):
             self._last_invalidate = now
             try:
                 self._app.invalidate()

@@ -9,7 +9,7 @@ Usage:
     # Scan staged changes (default when run from a git checkout)
     python scripts/check-windows-footguns.py
 
-    # Scan the full tree (full-repo audit)
+    # Scan the enforced scope (production packages + top-level modules + apps/)
     python scripts/check-windows-footguns.py --all
 
     # Scan a specific file or directory
@@ -709,7 +709,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--all",
         action="store_true",
-        help="Scan the full repository (hermes_cli/, gateway/, tools/, cron/, etc.).",
+        help="Scan the enforced scope (production packages, top-level modules, apps/).",
     )
     p.add_argument(
         "--diff",
@@ -749,7 +749,13 @@ def main(argv: list[str]) -> int:
         return 0
 
     if args.all:
-        # Scan main Python packages + scripts
+        # Scan the enforced scope: main Python packages + scripts + top-level
+        # modules (cli.py, run_agent.py, ...) + apps/. tests/, skills/ and
+        # optional-skills/ are intentionally NOT walked — ruff's per-file-ignores
+        # disables PLW1514 there by documented policy (tests deliberately
+        # exercise locale-encoding edge cases), and the rules this scanner owns
+        # beyond encoding (os.killpg, SIGKILL, subprocess text=True) have no
+        # production surface there.
         roots = [
             REPO_ROOT / "hermes_cli",
             REPO_ROOT / "gateway",
@@ -759,8 +765,10 @@ def main(argv: list[str]) -> int:
             REPO_ROOT / "plugins",
             REPO_ROOT / "scripts",
             REPO_ROOT / "acp_adapter",
+            REPO_ROOT / "apps",
         ]
         roots = [r for r in roots if r.exists()]
+        roots += sorted(REPO_ROOT.glob("*.py"))
     elif args.diff:
         roots = get_diff_files(args.diff)
     elif args.paths:

@@ -38,6 +38,7 @@ def _agent_for(home: Path, **overrides):
         valid_tool_names=[],
         _task_completion_guidance=False,
         _tool_use_enforcement=False,
+        _adhd_output_rules=False,
         _environment_probe=False,
         _kanban_worker_guidance="",
         _memory_store=None,
