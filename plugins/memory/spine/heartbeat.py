@@ -137,7 +137,10 @@ def check_sync(cfg):
     # it counted every unparseable file even when the file had never produced a
     # row at all (a born-broken .md has no prior record to retain), so a single
     # frontmatter typo pinned the check red while the sync itself ran green.
-    import sync_claude_memories as sync
+    # Explicit package import. A bare `import sync_claude_memories` resolves
+    # to the cron shim of the same name on sys.path[0], which re-execs the
+    # plugin source and clobbers sys.argv.
+    from spine import sync_claude_memories as sync
     jsonl = os.path.join(os.path.expanduser(cfg.canonical_root), "observations",
                          f"{CC_PROFILE}.jsonl")
     if not os.path.exists(jsonl):
@@ -328,8 +331,30 @@ def check_hotcore_coverage(cfg):
     if not total:
         return SKIP, "hot core is empty"
     if uncovered:
-        return FAIL, (f"{len(uncovered)}/{total} hot-core blocks are not retrievable from "
-                      f"spine — run sync_hotcore.py before trimming MEMORY.md")
+        # Separate what sync_hotcore CAN fix from what it cannot. The secrets
+        # detector holds blocks containing high-entropy tokens (file paths trip
+        # it), and sync_hotcore now treats that as a terminal state -- so telling
+        # the operator to "run sync_hotcore.py" for those is advice that exits 0
+        # and changes nothing. A permanently red guard is a guard people stop
+        # reading, and this one is the last thing between a MEMORY.md trim and
+        # destroying blocks that exist nowhere else.
+        from spine.coverage import strip_tag
+        from spine.secrets_detector import detect_secrets
+        importable, withheld = [], []
+        for block, _missing in uncovered:
+            verdict = detect_secrets(strip_tag(block))
+            # detect_secrets' own contract is {"blocked": bool} /
+            # {"held_for_review": bool} -- NOT handle_remember's outward
+            # {"held", "rejected"} keys. Guessing the wrong shape here would
+            # have made this branch dead code.
+            (withheld if (verdict.get("blocked") or verdict.get("held_for_review"))
+             else importable).append(block)
+        if importable:
+            return FAIL, (f"{len(importable)}/{total} hot-core blocks are not retrievable "
+                          f"from spine — run sync_hotcore.py before trimming MEMORY.md")
+        return FAIL, (f"{len(withheld)}/{total} hot-core blocks cannot be imported: the "
+                      f"secrets detector withholds them. sync_hotcore cannot fix these — "
+                      f"reword or trim them by hand, and do NOT trim MEMORY.md until then")
     return OK, f"all {total} hot-core blocks retrievable from spine"
 
 

@@ -69,7 +69,7 @@ RECALL_AT_SCHEMA = {
         "properties": {
             "query": {"type": "string", "description": "Search query (keyword-based)"},
             "as_of": {"type": "string", "description": "ISO-8601 timestamp or date (e.g. '2026-07-18' or '2026-07-18T00:00:00+00:00') — reconstruct state as of this point in time"},
-            "profile": {"type": "string", "description": "Profile filter (default: agent:main)"},
+            "profile": {"type": "string", "description": "Profile filter (default: all profiles)"},
             "k": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Number of results (default: 6)"},
         },
         "required": ["query", "as_of"],
@@ -83,7 +83,7 @@ REFLECT_SCHEMA = {
         "type": "object",
         "properties": {
             "question": {"type": "string", "description": "What to analyze or answer about the stored observations"},
-            "profile": {"type": "string", "description": "Profile filter (default: agent:main)"},
+            "profile": {"type": "string", "description": "Profile filter (default: all profiles)"},
         },
         "required": ["question"],
     },
@@ -110,7 +110,7 @@ EXPLAIN_SCHEMA = {
         "type": "object",
         "properties": {
             "obs_id": {"type": "string", "description": "Observation ID to explain (full 26-char ID or short prefix)"},
-            "profile": {"type": "string", "description": "Profile filter (default: agent:main)"},
+            "profile": {"type": "string", "description": "Profile filter (default: all profiles)"},
         },
         "required": ["obs_id"],
     },

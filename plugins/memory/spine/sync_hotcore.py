@@ -83,7 +83,7 @@ def main() -> None:
         }, config))
         if r.get("success"):
             ids.append(r["id"])
-        elif r.get("held") or r.get("blocked") or r.get("rejected"):
+        elif r.get("held") or r.get("rejected"):
             # The secrets detector holds on entropy and blocks 12-word prose.
             # Chin's memory notes are full of file paths, and a path like
             # /.hermes/skills/productivity/tracking-board/SKILL.md trips the
@@ -91,7 +91,8 @@ def main() -> None:
             # where the rejection is visible and recoverable; as a CRON gate it
             # meant one such block failed the run forever with nothing queued.
             # Report it and carry on.
-            withheld.append((content[:70], r.get("tokens") or r.get("reason")))
+            withheld.append((content[:70],
+                             r.get("tokens") or r.get("blocked_by") or "hard block"))
         else:
             print(f"  ! failed: {content[:70]} -> {r}")
 
