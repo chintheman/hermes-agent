@@ -24,6 +24,9 @@ import sqlite3
 import sys
 
 PROFILE = "agent:claude-code"
+# Stamped on every derived record; classify_gone() uses it to tell rows this
+# sync owns from rows another writer put here.
+EVIDENCE_PREFIX = "claude-code memory file: "
 MEM_DIR = os.path.expanduser("~/.claude/projects/-Users-0xsteamboat/memory")
 # MEMORY.md is the human-facing index, not a memory. Its content is just
 # one-line pointers to the other files, so importing it would add 55 duplicate
@@ -78,6 +81,20 @@ def parse(path: str):
     }
 
 
+def expected_row_count(prior, recs, skipped):
+    """Rows this profile should hold after a sync.
+
+    THE single source of this number. check_sync maintained its own copy and
+    rounds 4 and 5 broke it in opposite directions: first counting only
+    parseable files, then counting every unparseable file even when it had
+    never produced a row. Same duplicated-invariant disease classify_gone cured
+    inside this module.
+    """
+    gone = classify_gone(prior, recs, skipped)
+    retained = {o for o in gone["skipped"] | gone["foreign"] if o in prior}
+    return len(gone["built"] | retained)
+
+
 def classify_gone(prior, recs, skipped):
     """Partition the ids in the previous log that are not in this run's records.
 
@@ -95,11 +112,24 @@ def classify_gone(prior, recs, skipped):
     """
     built = {r["id"] for r in recs}
     skipped_ids = {stable_id(f) for f in skipped}
+    # Only rows THIS sync owns may be deleted. A row is ours if it carries the
+    # evidence marker build_records() stamps on every record derived from a .md.
+    # Rows without it came from another writer (handle_remember/handle_forget can
+    # both target this profile) and were previously carried through the lock
+    # window, landing in `deleted` on the very next run 4h later -- preserved
+    # briefly, then silently dropped from the append-only store.
+    ours = {oid for oid, rec in prior.items() if _is_derived(rec)}
     return {
         "built": built,
         "skipped": skipped_ids - built,
-        "deleted": set(prior) - built - skipped_ids,
+        "foreign": set(prior) - ours,
+        "deleted": ours - built - skipped_ids,
     }
+
+
+def _is_derived(rec):
+    """True if this record was generated from a Claude Code .md file."""
+    return any(str(e).startswith(EVIDENCE_PREFIX) for e in (rec.get("evidence") or []))
 
 
 def is_foreign(oid, prior, built, skipped_ids):
@@ -144,7 +174,7 @@ def build_records(now_iso: str):
             "contradicts": [],
             "created_at": now_iso,
             "epistemic": "extracted",
-            "evidence": [f"claude-code memory file: {fn}"],
+            "evidence": [f"{EVIDENCE_PREFIX}{fn}"],
             "id": stable_id(fn),
             "last_confirmed": now_iso,
             "last_retrieved": None,
@@ -279,7 +309,7 @@ def main() -> None:
             # An unparseable .md keeps its previous record verbatim. Dropping it
             # erased the memory from the source of truth and hard-failed the
             # sync on every run until the file was repaired.
-            for oid in gone["skipped"]:
+            for oid in gone["skipped"] | gone["foreign"]:
                 if oid in prior and oid not in {r["id"] for r in recs}:
                     recs.append(prior[oid])
         with open(tmp, "w", encoding="utf-8") as f:

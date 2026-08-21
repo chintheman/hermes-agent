@@ -70,7 +70,7 @@ def main() -> None:
         # whole exercise exists to prevent.
         sys.exit("refusing to import: embedder unavailable, rows would have no vectors")
 
-    ids = []
+    ids, withheld = [], []
     for block, _missing in uncovered:
         content = coverage.strip_tag(block)
         r = json.loads(handle_remember({
@@ -83,6 +83,15 @@ def main() -> None:
         }, config))
         if r.get("success"):
             ids.append(r["id"])
+        elif r.get("held") or r.get("blocked") or r.get("rejected"):
+            # The secrets detector holds on entropy and blocks 12-word prose.
+            # Chin's memory notes are full of file paths, and a path like
+            # /.hermes/skills/productivity/tracking-board/SKILL.md trips the
+            # entropy hold. That is a fine tradeoff for a user-initiated write,
+            # where the rejection is visible and recoverable; as a CRON gate it
+            # meant one such block failed the run forever with nothing queued.
+            # Report it and carry on.
+            withheld.append((content[:70], r.get("tokens") or r.get("reason")))
         else:
             print(f"  ! failed: {content[:70]} -> {r}")
 
@@ -107,8 +116,16 @@ def main() -> None:
         con.close()
 
     print(f"\nimported {len(ids)}, still uncovered: {len(still)}")
-    if still:
-        sys.exit(f"POST-IMPORT CHECK FAILED: {len(still)} blocks remain unretrievable")
+    for content, why in withheld:
+        print(f"  ~ withheld by the secrets detector ({why}): {content}")
+    # Withheld blocks can never become retrievable by this route, so excluding
+    # them is what makes the assertion meaningful rather than permanently red.
+    unresolved = len(still) - len(withheld)
+    if unresolved > 0:
+        sys.exit(f"POST-IMPORT CHECK FAILED: {unresolved} block(s) remain unretrievable")
+    if withheld:
+        print(f"{len(withheld)} block(s) withheld — review, then trim or reword them")
+        return
     print("hot core fully retrievable")
 
 

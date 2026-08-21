@@ -131,43 +131,53 @@ def check_hotcore(cfg):
 def check_sync(cfg):
     if not os.path.isdir(CLAUDE_MEM_DIR):
         return SKIP, "Claude Code memory dir not reachable"
-    # Count what the sync would actually import. Counting every .md meant one
-    # malformed file produced a permanent FAIL reading "the sync is not keeping
-    # up", which points at the wrong thing entirely.
-    from spine.sync_claude_memories import parse as _parse_memory_file
-    candidates = [f for f in os.listdir(CLAUDE_MEM_DIR)
-                  if f.endswith(".md") and f != "MEMORY.md"]
-    parseable, unparseable = [], []
-    for f in candidates:
-        try:
-            (parseable if _parse_memory_file(os.path.join(CLAUDE_MEM_DIR, f))
-             else unparseable).append(f)
-        except Exception:  # noqa: BLE001
-            unparseable.append(f)
-    n_files = len(parseable)
+    # Ask the SYNC what it expects rather than re-deriving it. Two private
+    # copies of "how many rows should exist" is why rounds 4 and 5 broke this
+    # check in opposite directions: first it counted only parseable files, then
+    # it counted every unparseable file even when the file had never produced a
+    # row at all (a born-broken .md has no prior record to retain), so a single
+    # frontmatter typo pinned the check red while the sync itself ran green.
+    import sync_claude_memories as sync
     jsonl = os.path.join(os.path.expanduser(cfg.canonical_root), "observations",
                          f"{CC_PROFILE}.jsonl")
     if not os.path.exists(jsonl):
         return FAIL, f"{CC_PROFILE} has never been synced"
+
+    prior = {}
+    for line in open(jsonl, encoding="utf-8"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if "patch" not in d:
+            prior[d["id"]] = d
+
+    sync.MEM_DIR = CLAUDE_MEM_DIR
+    recs, unparseable = sync.build_records("1970-01-01T00:00:00+00:00")
+    expected = sync.expected_row_count(prior, recs, unparseable)
+    n_files = len(recs)
+
     age_h = (time.time() - os.path.getmtime(jsonl)) / 3600
     con = sqlite3.connect(cfg.db)
     con.execute("PRAGMA query_only = ON")
-    n_rows = con.execute("SELECT COUNT(*) FROM observations WHERE profile=?",
-                         (CC_PROFILE,)).fetchone()[0]
-    con.close()
-    # Rows for unparseable files are RETAINED on purpose (a frontmatter typo must
-    # not delete the memory), so the expected row count is parseable + skipped.
-    # Comparing against parseable alone was off by exactly the number of broken
-    # files, producing the permanent FAIL this check was rewritten to avoid.
-    expected = n_files + len(unparseable)
+    try:
+        n_rows = con.execute("SELECT COUNT(*) FROM observations WHERE profile=?",
+                             (CC_PROFILE,)).fetchone()[0]
+    finally:
+        con.close()
+
     if n_rows != expected:
-        return FAIL, (f"{expected} memory files ({n_files} parseable, "
-                      f"{len(unparseable)} unparseable) but {n_rows} indexed rows — "
+        return FAIL, (f"expected {expected} rows for {CC_PROFILE} but found {n_rows} — "
                       f"the sync is not keeping up")
     if age_h > SYNC_STALE_HOURS:
         return FAIL, f"last sync was {age_h:.0f}h ago, expected within {SYNC_STALE_HOURS}h"
-    note = f", {len(unparseable)} unparseable ({', '.join(unparseable[:2])})" if unparseable else ""
-    return OK, f"{n_rows} files mirrored, last sync {age_h:.1f}h ago{note}"
+
+    note = (f", {len(unparseable)} unparseable ({', '.join(unparseable[:2])})"
+            if unparseable else "")
+    return OK, f"{n_rows} rows mirrored, last sync {age_h:.1f}h ago{note}"
 
 
 def check_divergence(cfg):

@@ -54,7 +54,7 @@ RECALL_SCHEMA = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Search query"},
-            "profile": {"type": "string", "description": "Profile filter (default: agent:main)"},
+            "profile": {"type": "string", "description": "Profile filter (default: all profiles)"},
             "k": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Number of results (default: 6)"},
         },
         "required": ["query"],
@@ -350,7 +350,9 @@ def handle_recall_at(args: Dict[str, Any], config: SpineConfig) -> str:
 
     query = args["query"]
     as_of = args["as_of"]
-    profile = args.get("profile", "agent:main")
+    # Same all-profiles default as recall/reflect/forget. Left at agent:main it
+    # silently missed agent:claude-code, half the store.
+    profile = args.get("profile", "*")
     k = min(args.get("k", 20), 25)
 
     obs_dir = _os.path.join(_os.path.expanduser(config.canonical_root), "observations")

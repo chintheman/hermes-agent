@@ -280,3 +280,50 @@ def test_lock_window_carries_new_records_but_not_deleted_ones():
     assert not sync.is_foreign(sync.stable_id("bravo.md"), prior, built, skips), \
         "a deleted memory was resurrected"
     assert not sync.is_foreign(recs2[0]["id"], prior, built, skips)
+
+
+def test_born_broken_file_does_not_inflate_the_expected_row_count():
+    """A .md that has NEVER parsed produces no row, so it must not be expected.
+
+    check_sync kept its own copy of this number and rounds 4 and 5 broke it in
+    opposite directions: counting only parseable files, then counting every
+    unparseable file even when it had never produced a row -- pinning the check
+    red while the sync ran green.
+    """
+    sync = _sync_fixture({"alpha": True, "bravo": True})
+    recs, skipped = sync.build_records("2026-01-01T00:00:00+00:00")
+    prior = {r["id"]: r for r in recs}
+    assert sync.expected_row_count(prior, recs, skipped) == 2
+
+    # a brand-new broken file: no prior record, so no row is ever created
+    open(os.path.join(sync.MEM_DIR, "delta.md"), "w").write("BROKEN\n")
+    recs2, skipped2 = sync.build_records("2026-01-02T00:00:00+00:00")
+    assert skipped2 == ["delta.md"]
+    assert sync.expected_row_count(prior, recs2, skipped2) == 2, \
+        "a file that never parsed must not be counted"
+
+    # a file that HAD parsed and is now broken keeps its row, so it IS counted
+    open(os.path.join(sync.MEM_DIR, "bravo.md"), "w").write("BROKEN\n")
+    recs3, skipped3 = sync.build_records("2026-01-03T00:00:00+00:00")
+    assert sync.expected_row_count(prior, recs3, skipped3) == 2
+
+
+def test_foreign_records_are_never_deleted():
+    """Rows another writer put in this profile are not this sync's to remove.
+
+    They were carried through the lock window, then landed in `deleted` on the
+    very next run 4h later and were dropped from the append-only store.
+    """
+    sync = _sync_fixture({"alpha": True})
+    recs, skipped = sync.build_records("2026-01-01T00:00:00+00:00")
+    prior = {r["id"]: r for r in recs}
+    prior["FOREIGN"] = {"id": "FOREIGN", "profile": sync.PROFILE,
+                        "evidence": ["handle_remember"]}
+    gone = sync.classify_gone(prior, recs, skipped)
+    assert "FOREIGN" in gone["foreign"]
+    assert "FOREIGN" not in gone["deleted"], "a foreign record was scheduled for deletion"
+    # and a derived record whose file is gone still IS deleted
+    recs2, skipped2 = sync.build_records("2026-01-02T00:00:00+00:00")
+    os.remove(os.path.join(sync.MEM_DIR, "alpha.md"))
+    recs3, skipped3 = sync.build_records("2026-01-03T00:00:00+00:00")
+    assert sync.classify_gone(prior, recs3, skipped3)["deleted"] == {recs[0]["id"]}
