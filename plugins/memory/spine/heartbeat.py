@@ -262,8 +262,7 @@ def check_eval(cfg):
         # from one document scores retrieval that never had to connect anything;
         # 11 of 12 were silently in that state once. --validate was otherwise a
         # flag a human had to remember to type.
-        if eval_run.validate() != 0:
-            return FAIL, "eval set has mislabelled multi-hop cases (see --validate)"
+        mislabelled = eval_run.validate(verbose=False)
         now = eval_run.run(base.get("profile", "*"))
     except Exception as e:  # noqa: BLE001
         # SKIP is for ABSENT evidence. A harness that raises is a broken tool,
@@ -282,6 +281,8 @@ def check_eval(cfg):
         out.append(f"{hop} {n}/{tot} (was {b})")
         if n < b - EVAL_REGRESSION_TOLERANCE:
             return FAIL, f"{hop}-hop recall regressed: {n} vs baseline {b}"
+    if mislabelled:
+        return FAIL, ", ".join(out)
     return OK, ", ".join(out) if out else "baseline has no sections to compare"
 
 

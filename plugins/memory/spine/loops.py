@@ -342,6 +342,7 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
     mem_size = os.path.getsize(mem_path) if os.path.exists(mem_path) else 0
     start_size = mem_size
 
+    rewrite_failed = False
     if mem_size > 20000:
         # Oldest-confirmed promoted rows first. Two things were wrong here
         # before: the text was never removed from MEMORY.md (so the file only
@@ -404,6 +405,7 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
                         f"MEMORY.md rewrite failed ({e}); {len(demote_ids)} rows left promoted")
                     demoted = 0
                     demote_ids = []
+                    rewrite_failed = True
                     # Re-read the truth. mem_size still held the value the
                     # excise loop simulated down to, so the report claimed a
                     # shrink that never happened AND the figure fell under the
@@ -427,9 +429,13 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
             # Say so loudly. A pass that runs nightly, removes nothing, and
             # reports success is exactly how the embedder outage went unseen
             # for eight days.
-            why = (f"{unmatched} promoted observation(s) could not be matched to a "
-                   f"block" if unmatched else
-                   "there are no promoted observations left to demote")
+            if rewrite_failed:
+                why = "the hot-core rewrite failed, so nothing was removed"
+            elif unmatched:
+                why = (f"{unmatched} promoted observation(s) could not be matched "
+                       f"to a block")
+            else:
+                why = "there are no promoted observations left to demote"
             warning = (
                 f"MEMORY.md is {mem_size:,} bytes, over the {20000:,} budget: {why}. "
                 f"Spine cannot shrink the file on its own — run the LLM-assisted "
@@ -548,10 +554,11 @@ def _excise_block(blocks: List[str], content: str) -> Optional[List[str]]:
     target = content.strip()
     for i, b in enumerate(blocks):
         if _block_body(b) == target:
-            # Exactly one, as the docstring says. Removing every match meant a
-            # legacy "[R] foo" and a promoted "[F] foo" both vanished when a
-            # single row was demoted, and the promote path's dedupe compares the
-            # full tagged string so those two are legitimately distinct entries.
+            # Exactly one. Removing every match meant a legacy "[R] foo" and a
+            # promoted "[F] foo" both vanished when a single row was demoted.
+            # (The promote dedupe is now tag-INSENSITIVE, so such a pair can no
+            # longer be created here — but pre-existing files still contain them,
+            # and one demoted row must only ever retire one block.)
             return blocks[:i] + blocks[i + 1:]
     return None
 

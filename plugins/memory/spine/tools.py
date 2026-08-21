@@ -165,13 +165,14 @@ def _get_writer(config: SpineConfig, profile: str = "agent:main") -> JSONLWriter
     "*.jsonl" and the record would be invisible to every rebuild.
     """
     if profile in ("*", "all"):
-        # Callers that only READ (explain) pass the wildcard scope through, and
-        # SpinePlugin.handle_tool_call has no try/except, so raising here escaped
-        # the dispatcher. Read paths get the default log; write paths must resolve
-        # the concrete profile first, which handle_forget now does explicitly.
-        return JSONLWriter(os.path.join(
-            os.path.expanduser(config.canonical_root), "observations",
-            "agent:main.jsonl"))
+        # Raise. Silently substituting a default log meant handle_remember, whose
+        # schema takes a free-form profile, could write {"profile": "*"} into
+        # agent:main.jsonl: a row consolidation never touches, recall by concrete
+        # profile never sees, forget cannot reach, and whose status patches go to
+        # a nonexistent observations/*.jsonl. A loud failure is the correct
+        # outcome; read paths that legitimately span profiles must not ask for a
+        # writer at all.
+        raise ValueError("refusing to write to a wildcard profile; resolve it first")
     obs_dir = os.path.join(config.canonical_root, "observations")
     return JSONLWriter(os.path.join(obs_dir, f"{profile}.jsonl"))
 
@@ -191,7 +192,11 @@ def handle_remember(args: Dict[str, Any], config: SpineConfig) -> str:
     """remember() — write gate with secrets check + dedupe (§4.1)."""
     content = args["content"]
     obs_type = args.get("type", "fact")
+# Caller-supplied and free-form in the schema. A wildcard is a read scope; a
+    # write must name one profile.
     profile = args.get("profile", "agent:main")
+    if profile in ("*", "all"):
+        return json.dumps({"error": "profile must name a single profile, not a wildcard"})
 
     # Reject events/logs
     if obs_type in ("event", "log"):
@@ -525,9 +530,14 @@ def handle_forget(args: Dict[str, Any], config: SpineConfig) -> str:
                      "add", jsonl_path],
                     capture_output=True, timeout=10,
                 )
+                # Pathspec is load-bearing. Without it this commits EVERYTHING
+                # already staged in ~/wiki -- consolidation reports, archive
+                # backups, index files -- under a "forget(...)" message. Round 3
+                # made this path live for the first time, so it had never fired.
                 _subprocess.run(
                     ["git", "-C", str(_os.path.dirname(_os.path.dirname(jsonl_path))),
-                     "commit", "-m", f"forget({obs_id[:8]}): removed observation"],
+                     "commit", "-m", f"forget({obs_id[:8]}): removed observation",
+                     "--", jsonl_path],
                     capture_output=True, timeout=10,
                 )
             except Exception:

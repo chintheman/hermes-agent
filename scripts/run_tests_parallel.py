@@ -55,7 +55,10 @@ from typing import Dict, List, Tuple
 
 
 # Default test discovery roots.
-_DEFAULT_ROOTS = ["tests"]
+# pyproject's `testpaths` only affects a bare `pytest` invocation; every CI lane
+# goes through this generator, so a suite absent from this list is absent from
+# CI no matter what testpaths says.
+_DEFAULT_ROOTS = ["tests", "plugins/memory/spine/tests"]
 
 # Directories to skip during discovery — these suites require real
 # external services (a model gateway, a docker daemon with a prebuilt

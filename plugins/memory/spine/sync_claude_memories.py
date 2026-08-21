@@ -241,7 +241,14 @@ def main() -> None:
             # is derived from the .md files, so anything else in this log is
             # foreign and must be carried through verbatim.
             for oid, rec in late_base.items():
-                if oid not in by_id and rec.get("profile") == PROFILE:
+                # `oid not in prior` is the load-bearing half. Without it this
+                # re-read the WHOLE file rather than a delta, so every record
+                # the first read had classified as `removed` (its .md deleted or
+                # renamed) was appended straight back -- resurrecting deleted
+                # memories into the source of truth and failing the post-sync
+                # check on every run thereafter, self-perpetuating because the
+                # resurrected record is in `prior` next time.
+                if oid not in prior and oid not in by_id and rec.get("profile") == PROFILE:
                     recs.append(rec)
         with open(tmp, "w", encoding="utf-8") as f:
             for r in recs:

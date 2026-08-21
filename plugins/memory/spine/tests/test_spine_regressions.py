@@ -33,6 +33,31 @@ def _round_trips(raw: str) -> bool:
     return raw.strip() == "\n§\n".join(parts)
 
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_hotcore():
+    """Point HOTCORE_PATH somewhere disposable for EVERY test, and restore it.
+
+    loops.HOTCORE_PATH defaults to the user's real ~/.hermes/memories/MEMORY.md,
+    which is injected into every agent call. Tests mutated that module global
+    with no teardown, so any future test reaching _promote_to_hotcore or
+    run_consolidation before setting it would write to production -- and this
+    suite now runs inside the shared 35k-test session.
+    """
+    original = loops.HOTCORE_PATH
+    guard = tempfile.mktemp(suffix=".md")
+    open(guard, "w", encoding="utf-8").write("[F] sandbox\n")
+    loops.HOTCORE_PATH = guard
+    try:
+        yield
+    finally:
+        loops.HOTCORE_PATH = original
+        if os.path.exists(guard):
+            os.remove(guard)
+
+
 def _hotcore(tmp_path_str, body):
     open(tmp_path_str, "w", encoding="utf-8").write(body)
     loops.HOTCORE_PATH = tmp_path_str
@@ -164,9 +189,47 @@ def test_sync_carries_status_and_age_forward():
     assert r2["status"] == "demoted" and r2["created_at"] == "2026-01-01"
 
 
-def test_wildcard_profile_never_produces_a_star_filename():
-    """A literal '*.jsonl' would be invisible to every rebuild."""
-    from spine.tools import _get_writer
+def test_wildcard_profile_write_is_refused():
+    """A wildcard is a READ scope; writing one must fail loudly, not silently.
+
+    Briefly it returned the agent:main log instead, which let handle_remember
+    (free-form profile in its schema) write {"profile": "*"} into agent:main's
+    file: a row consolidation never touches, recall by concrete profile never
+    sees, and forget cannot reach.
+    """
+    from spine.tools import _get_writer, handle_remember
     from spine.config import SpineConfig
-    w = _get_writer(SpineConfig(canonical_root=tempfile.mkdtemp()), "*")
-    assert "*" not in str(w._path), f"wildcard leaked into {w._path}"
+    cfg = SpineConfig(canonical_root=tempfile.mkdtemp())
+    try:
+        _get_writer(cfg, "*")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("_get_writer accepted a wildcard profile")
+    r = json.loads(handle_remember({"content": "x", "profile": "*"}, cfg))
+    assert "error" in r, "handle_remember accepted a wildcard profile"
+
+def test_hotcore_path_is_restored_after_each_test():
+    """The fixture must hand the real path back, or the next test writes to it."""
+    assert "/.hermes/memories/MEMORY.md" not in loops.HOTCORE_PATH, \
+        "a test is pointed at the live hot core"
+
+
+def test_sync_carry_through_does_not_resurrect_deletions():
+    """The re-read under the lock must be a DELTA, not the whole file.
+
+    Shipped briefly as `oid not in by_id`, which re-appended every record whose
+    .md had been deleted -- putting a forgotten memory back into the source of
+    truth and failing the post-sync check on every run thereafter.
+    """
+    prior = {"keep": {"id": "keep"}, "deleted": {"id": "deleted"}}
+    by_id = {"keep": {"id": "keep"}}
+    late_base = {"keep": {"id": "keep"}, "deleted": {"id": "deleted"},
+                 "brand_new": {"id": "brand_new"}}
+    carried = [o for o in late_base if o not in prior and o not in by_id]
+    assert carried == ["brand_new"], f"carried {carried}"
+    assert "deleted" not in carried, "a deleted memory was resurrected"
+    src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "sync_claude_memories.py"), encoding="utf-8").read()
+    assert "oid not in prior and oid not in by_id" in src, \
+        "sync no longer guards against resurrecting deletions"

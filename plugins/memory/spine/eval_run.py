@@ -131,7 +131,7 @@ def run(profile: str = "*") -> Dict[str, Any]:
     }
 
 
-def validate() -> int:
+def validate(verbose: bool = True) -> List[str]:
     """A multi-hop case is only meaningful if NO single document answers it.
 
     11 of 12 cases were mislabelled multi-hop while a single memory held every
@@ -152,11 +152,12 @@ def validate() -> int:
         ns = [n.lower() for n in c["expect_all"]]
         if any(all(n in d for n in ns) for d in docs):
             bad.append(c["id"])
-    for cid in bad:
-        print(f"MISLABELLED: {cid} — a single document contains every needle; "
-              f"this cannot test multi-hop. Reclassify as conj or change the needles.")
-    print(f"{len(bad)} invalid multi-hop case(s)")
-    return 1 if bad else 0
+    if verbose:
+        for cid in bad:
+            print(f"MISLABELLED: {cid} — a single document contains every needle; "
+                  f"this cannot test multi-hop. Reclassify as conj or change the needles.")
+        print(f"{len(bad)} invalid multi-hop case(s)")
+    return bad
 
 
 def show(rep: Dict[str, Any]) -> None:
@@ -223,7 +224,7 @@ if __name__ == "__main__":
     a = ap.parse_args()
 
     if a.validate:
-        sys.exit(validate())
+        sys.exit(1 if validate() else 0)
     rep = run(a.profile)
     show(rep)
     if a.save:
