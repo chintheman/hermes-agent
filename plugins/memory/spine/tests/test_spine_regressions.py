@@ -209,27 +209,74 @@ def test_wildcard_profile_write_is_refused():
     r = json.loads(handle_remember({"content": "x", "profile": "*"}, cfg))
     assert "error" in r, "handle_remember accepted a wildcard profile"
 
-def test_hotcore_path_is_restored_after_each_test():
-    """The fixture must hand the real path back, or the next test writes to it."""
-    assert "/.hermes/memories/MEMORY.md" not in loops.HOTCORE_PATH, \
-        "a test is pointed at the live hot core"
+def test_fixture_restores_the_real_hotcore_path():
+    """Assert on the RESTORED value, not the guard.
 
-
-def test_sync_carry_through_does_not_resurrect_deletions():
-    """The re-read under the lock must be a DELTA, not the whole file.
-
-    Shipped briefly as `oid not in by_id`, which re-appended every record whose
-    .md had been deleted -- putting a forgotten memory back into the source of
-    truth and failing the post-sync check on every run thereafter.
+    The previous version read HOTCORE_PATH inside the test body, where the
+    fixture has already swapped it, so deleting the fixture's `finally` left all
+    12 tests green -- the one test guarding the fixture could not see it break.
     """
-    prior = {"keep": {"id": "keep"}, "deleted": {"id": "deleted"}}
-    by_id = {"keep": {"id": "keep"}}
-    late_base = {"keep": {"id": "keep"}, "deleted": {"id": "deleted"},
-                 "brand_new": {"id": "brand_new"}}
-    carried = [o for o in late_base if o not in prior and o not in by_id]
-    assert carried == ["brand_new"], f"carried {carried}"
-    assert "deleted" not in carried, "a deleted memory was resurrected"
-    src = open(os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "sync_claude_memories.py"), encoding="utf-8").read()
-    assert "oid not in prior and oid not in by_id" in src, \
-        "sync no longer guards against resurrecting deletions"
+    import contextlib
+    original = loops.HOTCORE_PATH
+    gen = _never_touch_the_real_hotcore.__wrapped__()
+    next(gen)
+    assert loops.HOTCORE_PATH != original, "fixture did not redirect"
+    with contextlib.suppress(StopIteration):
+        next(gen)
+    assert loops.HOTCORE_PATH == original, "fixture did not restore the real path"
+
+
+def _sync_fixture(files):
+    """A memory dir plus the previous JSONL, ready for classify_gone()."""
+    import sync_claude_memories as sync
+    d = tempfile.mkdtemp()
+    md = os.path.join(d, "mem")
+    os.makedirs(md)
+    for name, ok in files.items():
+        body = (f"---\nname: {name}\ndescription: d\nmetadata:\n  type: project\n"
+                f"---\n\nbody of {name}\n") if ok else "BROKEN NO FRONTMATTER\n"
+        open(os.path.join(md, f"{name}.md"), "w").write(body)
+    sync.MEM_DIR = md
+    return sync
+
+
+def test_deleted_file_is_dropped_but_unparseable_file_is_kept():
+    """Four notions of "gone" lived in this module and each round broke one.
+
+    Round 3 resurrected deleted memories into the source of truth. Round 4 fixed
+    that and started ERASING memories whose frontmatter merely broke. Both are
+    data loss in the append-only store.
+    """
+    sync = _sync_fixture({"alpha": True, "bravo": True, "charlie": True})
+    recs, skipped = sync.build_records("2026-01-01T00:00:00+00:00")
+    prior = {r["id"]: r for r in recs}
+    assert len(prior) == 3 and not skipped
+
+    # bravo deleted, charlie's frontmatter broken
+    os.remove(os.path.join(sync.MEM_DIR, "bravo.md"))
+    open(os.path.join(sync.MEM_DIR, "charlie.md"), "w").write("BROKEN\n")
+    recs2, skipped2 = sync.build_records("2026-01-02T00:00:00+00:00")
+    assert skipped2 == ["charlie.md"]
+
+    gone = sync.classify_gone(prior, recs2, skipped2)
+    bravo = sync.stable_id("bravo.md")
+    charlie = sync.stable_id("charlie.md")
+    assert bravo in gone["deleted"], "a deleted file must be removed"
+    assert charlie in gone["skipped"], "an unparseable file must NOT be a deletion"
+    assert charlie not in gone["deleted"]
+
+
+def test_lock_window_carries_new_records_but_not_deleted_ones():
+    sync = _sync_fixture({"alpha": True, "bravo": True})
+    recs, skipped = sync.build_records("2026-01-01T00:00:00+00:00")
+    prior = {r["id"]: r for r in recs}
+    os.remove(os.path.join(sync.MEM_DIR, "bravo.md"))
+    recs2, skipped2 = sync.build_records("2026-01-02T00:00:00+00:00")
+    gone = sync.classify_gone(prior, recs2, skipped2)
+    built, skips = gone["built"], gone["skipped"]
+
+    assert sync.is_foreign("brand_new_id", prior, built, skips), \
+        "a record appended during the lock window must be carried through"
+    assert not sync.is_foreign(sync.stable_id("bravo.md"), prior, built, skips), \
+        "a deleted memory was resurrected"
+    assert not sync.is_foreign(recs2[0]["id"], prior, built, skips)

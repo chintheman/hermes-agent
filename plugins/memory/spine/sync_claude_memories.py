@@ -78,6 +78,35 @@ def parse(path: str):
     }
 
 
+def classify_gone(prior, recs, skipped):
+    """Partition the ids in the previous log that are not in this run's records.
+
+    ONE place decides what "gone" means. `prior`, `removed`, `skipped_ids` and
+    the lock-window carry-through were four overlapping answers to that question,
+    maintained independently, and each review round broke one by fixing another:
+    round 3 resurrected deletions, round 4 then erased unparseable files.
+
+      built    — a record was rebuilt this run; nothing to decide
+      skipped  — the .md exists but failed to parse. NOT a deletion. Keep the
+                 row: a frontmatter typo must not silently destroy the memory.
+      deleted  — the .md is genuinely gone. Drop the row.
+      foreign  — never in `prior`, so it arrived after this run's first read;
+                 the lock-window carry-through must preserve it.
+    """
+    built = {r["id"] for r in recs}
+    skipped_ids = {stable_id(f) for f in skipped}
+    return {
+        "built": built,
+        "skipped": skipped_ids - built,
+        "deleted": set(prior) - built - skipped_ids,
+    }
+
+
+def is_foreign(oid, prior, built, skipped_ids):
+    """True if `oid` appeared during the lock window and must be carried through."""
+    return oid not in prior and oid not in built and oid not in skipped_ids
+
+
 def merge_prior(rec, prior):
     """Fold a previous record into a freshly built one; returns the change state.
 
@@ -188,8 +217,7 @@ def main() -> None:
             unchanged += 1
     # A file that failed to parse is NOT a deletion. Treating it as one turned
     # "you broke the frontmatter" into "this memory is silently unretrievable".
-    skipped_ids = {stable_id(f) for f in skipped}
-    removed = sorted(set(prior) - {r["id"] for r in recs} - skipped_ids)
+    removed = sorted(classify_gone(prior, recs, skipped)["deleted"])
 
     print(f"profile   : {PROFILE}")
     print(f"files     : {len(recs)} parsed, {len(skipped)} skipped {skipped}")
@@ -240,16 +268,20 @@ def main() -> None:
             # lock would otherwise be erased by the os.replace below. The rebuild
             # is derived from the .md files, so anything else in this log is
             # foreign and must be carried through verbatim.
+            gone = classify_gone(prior, recs, skipped)
             for oid, rec in late_base.items():
-                # `oid not in prior` is the load-bearing half. Without it this
-                # re-read the WHOLE file rather than a delta, so every record
-                # the first read had classified as `removed` (its .md deleted or
-                # renamed) was appended straight back -- resurrecting deleted
-                # memories into the source of truth and failing the post-sync
-                # check on every run thereafter, self-perpetuating because the
-                # resurrected record is in `prior` next time.
-                if oid not in prior and oid not in by_id and rec.get("profile") == PROFILE:
+                # Carry through ONLY genuinely-new records. Records whose .md was
+                # deleted must not come back (round 3 resurrected them); records
+                # whose .md merely failed to parse are re-added below, not here.
+                if is_foreign(oid, prior, gone["built"], gone["skipped"]) \
+                        and rec.get("profile") == PROFILE:
                     recs.append(rec)
+            # An unparseable .md keeps its previous record verbatim. Dropping it
+            # erased the memory from the source of truth and hard-failed the
+            # sync on every run until the file was repaired.
+            for oid in gone["skipped"]:
+                if oid in prior and oid not in {r["id"] for r in recs}:
+                    recs.append(prior[oid])
         with open(tmp, "w", encoding="utf-8") as f:
             for r in recs:
                 f.write(json.dumps(r, sort_keys=True) + "\n")
@@ -282,8 +314,10 @@ def main() -> None:
         idx.close()
 
     print(f"\nindexed   : {total} rows in {PROFILE}, {novec} missing vectors")
-    if novec or total != len(recs):
-        sys.exit(f"POST-SYNC CHECK FAILED: expected {len(recs)} rows with vectors")
+    if novec:
+        sys.exit(f"POST-SYNC CHECK FAILED: {novec} row(s) have no vector")
+    if total != len(recs):
+        sys.exit(f"POST-SYNC CHECK FAILED: {total} rows indexed, expected {len(recs)}")
     print("sync OK")
 
 

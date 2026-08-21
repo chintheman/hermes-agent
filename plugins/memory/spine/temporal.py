@@ -34,7 +34,12 @@ def load_observations_as_of(obs_dir: str, as_of: str, profile_filter: str = "") 
 
     for jsonl_file in sorted(obs_path.glob("*.jsonl")):
         profile = jsonl_file.stem
-        if profile_filter and profile != profile_filter:
+        # "*" is the all-profiles scope used by recall/reflect/forget. Compared
+        # literally against a filename stem it matched nothing, so recall_at
+        # silently returned [] instead of searching everything.
+        if profile_filter in ("*", "all"):
+            pass
+        elif profile_filter and profile != profile_filter:
             continue
         with open(jsonl_file, "r", encoding="utf-8") as f:
             for line in f:

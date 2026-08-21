@@ -155,8 +155,14 @@ def check_sync(cfg):
     n_rows = con.execute("SELECT COUNT(*) FROM observations WHERE profile=?",
                          (CC_PROFILE,)).fetchone()[0]
     con.close()
-    if n_rows != n_files:
-        return FAIL, (f"{n_files} memory files but {n_rows} indexed rows — "
+    # Rows for unparseable files are RETAINED on purpose (a frontmatter typo must
+    # not delete the memory), so the expected row count is parseable + skipped.
+    # Comparing against parseable alone was off by exactly the number of broken
+    # files, producing the permanent FAIL this check was rewritten to avoid.
+    expected = n_files + len(unparseable)
+    if n_rows != expected:
+        return FAIL, (f"{expected} memory files ({n_files} parseable, "
+                      f"{len(unparseable)} unparseable) but {n_rows} indexed rows — "
                       f"the sync is not keeping up")
     if age_h > SYNC_STALE_HOURS:
         return FAIL, f"last sync was {age_h:.0f}h ago, expected within {SYNC_STALE_HOURS}h"
@@ -282,7 +288,12 @@ def check_eval(cfg):
         if n < b - EVAL_REGRESSION_TOLERANCE:
             return FAIL, f"{hop}-hop recall regressed: {n} vs baseline {b}"
     if mislabelled:
-        return FAIL, ", ".join(out)
+        # Lead with the REASON. This returned ", ".join(out) -- the scores only --
+        # so a red check reported perfect numbers with no case id and no cause.
+        return FAIL, (f"eval set has {len(mislabelled)} mislabelled multi-hop "
+                      f"case(s) ({', '.join(mislabelled)}): a single document "
+                      f"answers them, so they test nothing. Scores: "
+                      + ", ".join(out[1:] if out and out[0].startswith(str(len(mislabelled))) else out))
     return OK, ", ".join(out) if out else "baseline has no sections to compare"
 
 
