@@ -426,8 +426,10 @@ FOOTGUNS: list[Footgun] = [
             # on a later line. Balance parens from the call opener instead
             # of requiring the line to END with ``)`` so chained forms like
             # ``read_text()[:4000]`` / ``read_text().splitlines()`` are
-            # still caught. AST-level enforcement for multi-line calls
-            # lives in the gateway guard test.
+            # still caught. AST-level enforcement for multi-line calls lives
+            # in the gateway guard test (gateway/ only — see
+            # tests/gateway/test_gateway_utf8_encoding.py); the other roots
+            # rely on this regex.
             and _call_closes_on_line(line, m.end())
         ),
     ),
@@ -733,6 +735,36 @@ def print_rules() -> None:
         print()
 
 
+def all_roots(repo_root: Path) -> list[Path]:
+    """Enforced-scope roots for ``--all``.
+
+    Shipped top-level packages (reconciled against ``pyproject.toml``
+    ``[tool.setuptools.packages.find].include``) + top-level modules
+    (``cli.py``, ``run_agent.py``, ...) + ``apps/``. ``tests/``, ``skills/``,
+    ``optional-skills/`` and ``evals/`` are intentionally NOT walked — ruff's
+    per-file-ignores disables PLW1514 there by documented policy (tests
+    deliberately exercise locale-encoding edge cases), and the rules this
+    scanner owns beyond encoding (os.killpg, SIGKILL, subprocess text=True)
+    have no shipped surface there.
+    """
+    roots = [
+        repo_root / "hermes_cli",
+        repo_root / "gateway",
+        repo_root / "tools",
+        repo_root / "cron",
+        repo_root / "agent",
+        repo_root / "plugins",
+        repo_root / "scripts",
+        repo_root / "acp_adapter",
+        repo_root / "tui_gateway",
+        repo_root / "providers",
+        repo_root / "apps",
+    ]
+    roots = [r for r in roots if r.exists()]
+    roots += sorted(repo_root.glob("*.py"))
+    return roots
+
+
 def main(argv: list[str]) -> int:
     # Windows terminals default to cp1252, which can't encode the ✓/✗
     # characters used in the output. Reconfigure streams to UTF-8 so the
@@ -749,26 +781,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     if args.all:
-        # Scan the enforced scope: main Python packages + scripts + top-level
-        # modules (cli.py, run_agent.py, ...) + apps/. tests/, skills/ and
-        # optional-skills/ are intentionally NOT walked — ruff's per-file-ignores
-        # disables PLW1514 there by documented policy (tests deliberately
-        # exercise locale-encoding edge cases), and the rules this scanner owns
-        # beyond encoding (os.killpg, SIGKILL, subprocess text=True) have no
-        # production surface there.
-        roots = [
-            REPO_ROOT / "hermes_cli",
-            REPO_ROOT / "gateway",
-            REPO_ROOT / "tools",
-            REPO_ROOT / "cron",
-            REPO_ROOT / "agent",
-            REPO_ROOT / "plugins",
-            REPO_ROOT / "scripts",
-            REPO_ROOT / "acp_adapter",
-            REPO_ROOT / "apps",
-        ]
-        roots = [r for r in roots if r.exists()]
-        roots += sorted(REPO_ROOT.glob("*.py"))
+        roots = all_roots(REPO_ROOT)
     elif args.diff:
         roots = get_diff_files(args.diff)
     elif args.paths:
@@ -778,7 +791,7 @@ def main(argv: list[str]) -> int:
         roots = get_staged_files()
         if not roots:
             print(
-                "No staged files to scan. Pass --all for a full-repo scan, "
+                "No staged files to scan. Pass --all for an enforced-scope scan, "
                 "--diff <ref> for a range diff, or paths explicitly.",
                 file=sys.stderr,
             )

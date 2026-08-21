@@ -428,7 +428,7 @@ class TestFocusRegainRedraw:
         assert calls == ["redraw", "redraw"]
 
     def test_focus_regain_redraw_fires_on_fresh_instance_with_low_clock(
-        self, bare_cli, monkeypatch
+        self, bare_cli
     ):
         """A never-redrawn CLI is always eligible for the first redraw.
 
@@ -438,11 +438,14 @@ class TestFocusRegainRedraw:
         suppressed and the test saw zero redraws — an intermittent red that cost
         multiple CI runs to diagnose. A ``None`` sentinel keeps the suppression
         semantics for repeat calls while making the first call unconditional.
+
+        The huge interval expresses the young-process condition without freezing
+        the stdlib clock: any real ``time.monotonic()`` value is ``< 1e9``, so
+        the old ``0.0`` default suppressed this call deterministically.
         """
         calls = []
         bare_cli._force_full_redraw = lambda: calls.append("redraw")
-        monkeypatch.setattr(cli_mod.time, "monotonic", lambda: 0.5)
 
-        bare_cli._schedule_focus_regain_redraw()  # min_interval=1.0 default
+        bare_cli._schedule_focus_regain_redraw(min_interval=1e9)
 
         assert calls == ["redraw"]

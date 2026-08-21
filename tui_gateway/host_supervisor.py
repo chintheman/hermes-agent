@@ -88,15 +88,14 @@ def _default_registry_path() -> Path:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except Exception:
-        return False
+    # psutil.pid_exists is the canonical cross-platform liveness probe —
+    # os.kill(pid, 0) is a silent process-killer on Windows (sends
+    # CTRL_C_EVENT to the target's console group, bpo-14484). psutil is a
+    # core dependency (see pyproject.toml "Cross-platform process / PID
+    # management").
+    import psutil
+
+    return psutil.pid_exists(pid)
 
 
 def _pid_command(pid: int) -> str:
@@ -544,7 +543,7 @@ class HostSupervisor:
                 return
             time.sleep(0.05)
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         except ProcessLookupError:
             return
         except Exception:

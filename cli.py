@@ -5305,7 +5305,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         
         # History file for persistent input recall across sessions
         self._history_file = _hermes_home / ".hermes_history"
-        self._last_invalidate: float = 0.0  # throttle UI repaints
+        self._last_invalidate: float | None = None  # throttle UI repaints
         self._app = None
 
         # State shared by interactive run() and single-query chat mode.

@@ -47,7 +47,7 @@ def _hermes_ensure_own_tab():
         # re-attaches to the first shared page) re-pins automatically,
         # while agent-driven tab switches mid-session are left alone.
         from browser_harness import _ipc as _bipc
-        _dpid = _bipc.pid_path(_name).read_text().strip() or "0"
+        _dpid = _bipc.pid_path(_name).read_text(encoding="utf-8", errors="replace").strip() or "0"
     except Exception:
         _dpid = "0"
     _uid = _os.getuid() if hasattr(_os, "getuid") else 0
