@@ -4569,7 +4569,11 @@ def test_ws_orphan_reap_releases_resume_lock_before_slow_teardown(monkeypatch):
     thread.start()
     acquired = False
     try:
-        assert teardown_started.wait(timeout=1.0)
+        # 5s liveness window (was 1s): the reap callback runs on a fresh
+        # thread; under CI load (8 parallel workers) the scheduler can starve
+        # it past 1s, flaking the assert. The teardown ORDER assertions that
+        # follow are the real contract; the wait is just a bound.
+        assert teardown_started.wait(timeout=5.0)
         assert "slow-orphan" not in server._sessions
         acquired = server._session_resume_lock.acquire(timeout=0.2)
         assert acquired, "orphan teardown kept the global resume lock held"
