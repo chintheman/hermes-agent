@@ -229,6 +229,36 @@ class TestRateLimiting:
             "a failed sync must not rate-limit the next retry"
         )
 
+    def test_first_sync_runs_on_a_young_process(self, tmp_files, monkeypatch):
+        """A never-synced manager must not be rate-limited on a young process.
+
+        Regression: ``_last_sync_time`` was seeded ``0.0`` and the guard was
+        ``now - 0.0 < sync_interval``, so on a process whose monotonic clock
+        was still below the interval (container cold start, fresh VM, CI
+        runner) the FIRST non-forced sync() returned early — silently
+        suppressing the retry the rollback path had just prepared. The None
+        sentinel makes the first call unconditional. Red against the ``0.0``
+        seed (2.0 - 0.0 < 10.0), green with None.
+        """
+        from tools.environments import file_sync
+
+        clock = {"t": 2.0}  # monotonic() < sync_interval
+        monkeypatch.setattr(file_sync, "_monotonic", lambda: clock["t"])
+
+        upload = MagicMock()
+        mgr = FileSyncManager(
+            get_files_fn=_make_get_files(tmp_files),
+            upload_fn=upload,
+            delete_fn=MagicMock(),
+            sync_interval=10.0,
+        )
+
+        mgr.sync()  # first call, NOT forced
+
+        assert upload.call_count == 3, (
+            "never-synced manager must not be rate-limited"
+        )
+
 
 class TestEdgeCases:
     def test_empty_file_list(self):

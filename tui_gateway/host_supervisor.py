@@ -92,13 +92,21 @@ def _pid_alive(pid: int) -> bool:
     # (psutil with ctypes/POSIX fallback; zombies reported dead per #42126).
     # Avoids os.kill(pid, 0), which on Windows is NOT a no-op — it routes to
     # CTRL_C_EVENT and hard-kills the target's console process group
-    # (bpo-14484). Any error resolves to False (treat unknown as dead) so a
-    # corrupt on-disk host_pid (e.g. 2**63) self-heals instead of wedging the
-    # orphan-reconciliation path.
+    # (bpo-14484). If the gateway import tree fails (stripped install, broken
+    # optional dep, half-applied upgrade), fall through to psutil directly so
+    # a live host is never misreported as dead; any remaining error resolves
+    # to False (treat unknown as dead) so a corrupt on-disk host_pid (e.g.
+    # 2**63) self-heals instead of wedging the orphan-reconciliation path.
     try:
         from gateway.status import _pid_exists
 
-        return bool(_pid_exists(pid))
+        return bool(_pid_exists(int(pid)))
+    except Exception as exc:
+        logger.debug("pid probe via gateway.status failed for pid=%s: %s", pid, exc)
+    try:
+        import psutil  # type: ignore
+
+        return bool(psutil.pid_exists(int(pid)))
     except Exception:
         return False
 

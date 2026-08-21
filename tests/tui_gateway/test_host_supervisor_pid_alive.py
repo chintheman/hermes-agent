@@ -29,13 +29,17 @@ def test_pid_alive_live_pid():
 
 
 def test_pid_alive_reaped_pid():
-    """A PID that has exited must report dead (or recycled), never raise."""
+    """A PID that has exited must report dead — except on Windows, where PIDs
+    are recycled from a free pool immediately (so the probe may legitimately
+    hit a reused PID)."""
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     proc.wait(timeout=30)
     pid = proc.pid
-    # The PID may be recycled by the OS between reap and this check, so the
-    # contract under test is the bool return + no-raise, not the exact value.
-    assert _pid_alive(pid) in (True, False)
+    result = _pid_alive(pid)
+    if sys.platform == "win32":
+        assert result in (True, False)  # PID may already be recycled
+    else:
+        assert result is False, "a reaped child must report dead"
 
 
 def test_pid_alive_out_of_range_does_not_raise():
