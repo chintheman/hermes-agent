@@ -2,19 +2,19 @@
   "profile": "*",
   "embedder": true,
   "k": 20,
-  "passed": 28,
+  "passed": 26,
   "by_hop": {
     "single": {
       "passed": 17,
       "total": 17
     },
     "multi": {
-      "passed": 11,
+      "passed": 9,
       "total": 12
     }
   },
   "total": 29,
-  "median_search_ms": 10.4,
+  "median_search_ms": 10.6,
   "cases": [
     {
       "id": "sg-lwix-weighting",
@@ -29,8 +29,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 66.2,
-      "embed_ms": 139.7,
+      "search_ms": 80.5,
+      "embed_ms": 367.8,
       "n_hits": 20,
       "n_wiki": 16,
       "top": [
@@ -130,8 +130,8 @@
       ],
       "n_sources": 11,
       "need_sources": 0,
-      "search_ms": 12.0,
-      "embed_ms": 35.5,
+      "search_ms": 12.8,
+      "embed_ms": 32.9,
       "n_hits": 20,
       "n_wiki": 4,
       "top": [
@@ -230,8 +230,8 @@
       ],
       "n_sources": 8,
       "need_sources": 0,
-      "search_ms": 10.9,
-      "embed_ms": 38.1,
+      "search_ms": 11.5,
+      "embed_ms": 33.0,
       "n_hits": 20,
       "n_wiki": 11,
       "top": [
@@ -328,8 +328,8 @@
       ],
       "n_sources": 10,
       "need_sources": 0,
-      "search_ms": 13.3,
-      "embed_ms": 39.9,
+      "search_ms": 13.0,
+      "embed_ms": 34.6,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -358,12 +358,12 @@
           "content": "Hardware & Infrastructure Reference: ## M1/M4 Architecture\n\nM1 runs Hermes backend (gateway, scheduler, DB). M"
         },
         {
-          "src": "obs",
-          "content": "Current confirmed topology across Hermes, Claude Code, and Zo \u2014 who can reach whom, verified live 2026-08-03\n\n"
-        },
-        {
           "src": "wiki",
           "content": "VPS + Shared Memory \u2014 Research & Assessment: ## Recommendation\n\n**Use what you already have before buying more"
+        },
+        {
+          "src": "obs",
+          "content": "Current confirmed topology across Hermes, Claude Code, and Zo \u2014 who can reach whom, verified live 2026-08-03\n\n"
         },
         {
           "src": "wiki",
@@ -428,8 +428,8 @@
       ],
       "n_sources": 16,
       "need_sources": 0,
-      "search_ms": 12.4,
-      "embed_ms": 37.1,
+      "search_ms": 12.5,
+      "embed_ms": 37.5,
       "n_hits": 20,
       "n_wiki": 12,
       "top": [
@@ -526,8 +526,8 @@
       ],
       "n_sources": 4,
       "need_sources": 0,
-      "search_ms": 11.2,
-      "embed_ms": 32.7,
+      "search_ms": 11.3,
+      "embed_ms": 35.2,
       "n_hits": 20,
       "n_wiki": 6,
       "top": [
@@ -625,8 +625,8 @@
       ],
       "n_sources": 10,
       "need_sources": 0,
-      "search_ms": 10.0,
-      "embed_ms": 20.2,
+      "search_ms": 9.8,
+      "embed_ms": 20.8,
       "n_hits": 20,
       "n_wiki": 12,
       "top": [
@@ -724,8 +724,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 11.0,
-      "embed_ms": 19.1,
+      "search_ms": 11.2,
+      "embed_ms": 18.3,
       "n_hits": 20,
       "n_wiki": 17,
       "top": [
@@ -824,8 +824,8 @@
       ],
       "n_sources": 7,
       "need_sources": 0,
-      "search_ms": 8.2,
-      "embed_ms": 20.2,
+      "search_ms": 8.4,
+      "embed_ms": 18.8,
       "n_hits": 20,
       "n_wiki": 16,
       "top": [
@@ -922,8 +922,8 @@
       ],
       "n_sources": 2,
       "need_sources": 0,
-      "search_ms": 9.3,
-      "embed_ms": 19.6,
+      "search_ms": 9.7,
+      "embed_ms": 18.5,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -1021,8 +1021,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 8.3,
-      "embed_ms": 20.6,
+      "search_ms": 8.6,
+      "embed_ms": 19.8,
       "n_hits": 20,
       "n_wiki": 11,
       "top": [
@@ -1121,8 +1121,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 10.6,
-      "embed_ms": 20.6,
+      "search_ms": 9.1,
+      "embed_ms": 20.1,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -1220,8 +1220,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 12.3,
-      "embed_ms": 20.5,
+      "search_ms": 11.1,
+      "embed_ms": 20.1,
       "n_hits": 20,
       "n_wiki": 10,
       "top": [
@@ -1317,8 +1317,8 @@
       ],
       "n_sources": 2,
       "need_sources": 0,
-      "search_ms": 10.4,
-      "embed_ms": 20.9,
+      "search_ms": 9.4,
+      "embed_ms": 21.0,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -1415,8 +1415,8 @@
       ],
       "n_sources": 2,
       "need_sources": 0,
-      "search_ms": 9.1,
-      "embed_ms": 32.1,
+      "search_ms": 9.2,
+      "embed_ms": 32.2,
       "n_hits": 20,
       "n_wiki": 12,
       "top": [
@@ -1515,8 +1515,8 @@
       ],
       "n_sources": 1,
       "need_sources": 0,
-      "search_ms": 12.3,
-      "embed_ms": 20.6,
+      "search_ms": 13.4,
+      "embed_ms": 21.5,
       "n_hits": 20,
       "n_wiki": 5,
       "top": [
@@ -1613,8 +1613,8 @@
       ],
       "n_sources": 3,
       "need_sources": 0,
-      "search_ms": 10.2,
-      "embed_ms": 19.8,
+      "search_ms": 10.5,
+      "embed_ms": 20.1,
       "n_hits": 20,
       "n_wiki": 5,
       "top": [
@@ -1706,13 +1706,13 @@
       "hop": "multi",
       "passed": true,
       "matched": [
-        "mcp",
-        "rce"
+        "mcp first",
+        "unauthenticated"
       ],
-      "n_sources": 6,
+      "n_sources": 2,
       "need_sources": 2,
       "search_ms": 10.3,
-      "embed_ms": 19.5,
+      "embed_ms": 21.5,
       "n_hits": 20,
       "n_wiki": 14,
       "top": [
@@ -1808,10 +1808,10 @@
         "jsonl",
         "promote"
       ],
-      "n_sources": 10,
+      "n_sources": 3,
       "need_sources": 2,
-      "search_ms": 9.5,
-      "embed_ms": 20.2,
+      "search_ms": 11.0,
+      "embed_ms": 22.3,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -1901,15 +1901,15 @@
       "id": "mh-blocked-cli",
       "q": "a shell command is blocked for Claude Code, what should I try before asking Chin",
       "hop": "multi",
-      "passed": true,
+      "passed": false,
       "matched": [
-        "hermes",
+        "hermes chat",
         "classifier"
       ],
-      "n_sources": 16,
+      "n_sources": 1,
       "need_sources": 2,
-      "search_ms": 10.2,
-      "embed_ms": 31.7,
+      "search_ms": 10.1,
+      "embed_ms": 43.9,
       "n_hits": 20,
       "n_wiki": 9,
       "top": [
@@ -2004,10 +2004,10 @@
         "keychain",
         "classifier"
       ],
-      "n_sources": 6,
+      "n_sources": 2,
       "need_sources": 2,
-      "search_ms": 9.4,
-      "embed_ms": 20.0,
+      "search_ms": 9.9,
+      "embed_ms": 18.8,
       "n_hits": 20,
       "n_wiki": 10,
       "top": [
@@ -2104,8 +2104,8 @@
       ],
       "n_sources": 1,
       "need_sources": 2,
-      "search_ms": 9.4,
-      "embed_ms": 19.5,
+      "search_ms": 10.0,
+      "embed_ms": 18.3,
       "n_hits": 20,
       "n_wiki": 12,
       "top": [
@@ -2142,16 +2142,16 @@
           "content": "Daily spine heartbeat (cron ee87d568b7c3, 09:00, topic 11) checks 7 things that previously failed silently. Si"
         },
         {
-          "src": "obs",
-          "content": "MACHINERY IS SILENT (Aug 17 2026, from Claude Code session diagnosis): Review gates, memory-file repairs, cron"
-        },
-        {
           "src": "wiki",
           "content": "Hermes Config Drift Gotcha: ## Body\nHermes config.yaml `model.default` silently reverted from `deepseek-v4-fla"
         },
         {
           "src": "wiki",
           "content": "2026-07-15-pa-link-systemcracker-profile: ---\ncaptured: \"2026-07-15T17:26:06+08:00\"\nsource_url: \"https://www.i"
+        },
+        {
+          "src": "obs",
+          "content": "MACHINERY IS SILENT (Aug 17 2026, from Claude Code session diagnosis): Review gates, memory-file repairs, cron"
         },
         {
           "src": "wiki",
@@ -2201,10 +2201,10 @@
         "zo",
         "initiate"
       ],
-      "n_sources": 17,
+      "n_sources": 3,
       "need_sources": 2,
-      "search_ms": 10.8,
-      "embed_ms": 18.6,
+      "search_ms": 11.0,
+      "embed_ms": 19.3,
       "n_hits": 20,
       "n_wiki": 4,
       "top": [
@@ -2238,11 +2238,11 @@
         },
         {
           "src": "obs",
-          "content": "Current confirmed topology across Hermes, Claude Code, and Zo \u2014 who can reach whom, verified live 2026-08-03\n\n"
+          "content": "User handles Claude Code installations themselves \u2014 said 'implement for hermes, i'll handle claude separately'"
         },
         {
           "src": "obs",
-          "content": "User handles Claude Code installations themselves \u2014 said 'implement for hermes, i'll handle claude separately'"
+          "content": "Current confirmed topology across Hermes, Claude Code, and Zo \u2014 who can reach whom, verified live 2026-08-03\n\n"
         },
         {
           "src": "obs",
@@ -2301,8 +2301,8 @@
       ],
       "n_sources": 2,
       "need_sources": 2,
-      "search_ms": 9.0,
-      "embed_ms": 18.2,
+      "search_ms": 8.8,
+      "embed_ms": 19.5,
       "n_hits": 20,
       "n_wiki": 11,
       "top": [
@@ -2398,10 +2398,10 @@
         "consolidation",
         "promote"
       ],
-      "n_sources": 9,
+      "n_sources": 3,
       "need_sources": 2,
-      "search_ms": 11.9,
-      "embed_ms": 17.7,
+      "search_ms": 11.6,
+      "embed_ms": 18.1,
       "n_hits": 20,
       "n_wiki": 14,
       "top": [
@@ -2498,8 +2498,8 @@
       ],
       "n_sources": 2,
       "need_sources": 2,
-      "search_ms": 11.2,
-      "embed_ms": 18.7,
+      "search_ms": 12.1,
+      "embed_ms": 21.1,
       "n_hits": 20,
       "n_wiki": 8,
       "top": [
@@ -2589,15 +2589,15 @@
       "id": "mh-memory-sync-latency",
       "q": "if I write a Claude Code memory file now, when can Hermes search it",
       "hop": "multi",
-      "passed": true,
+      "passed": false,
       "matched": [
         "sync",
         "4 hours"
       ],
       "n_sources": 1,
-      "need_sources": 1,
-      "search_ms": 12.4,
-      "embed_ms": 21.1,
+      "need_sources": 2,
+      "search_ms": 12.3,
+      "embed_ms": 20.5,
       "n_hits": 20,
       "n_wiki": 12,
       "top": [
@@ -2692,10 +2692,10 @@
         "negative control",
         "verify"
       ],
-      "n_sources": 5,
+      "n_sources": 2,
       "need_sources": 2,
-      "search_ms": 9.7,
-      "embed_ms": 20.6,
+      "search_ms": 10.0,
+      "embed_ms": 20.4,
       "n_hits": 20,
       "n_wiki": 10,
       "top": [
@@ -2744,12 +2744,12 @@
           "content": "Before reporting a security/health finding from a probe, run a negative control \u2014 prove the test can fail\n\n202"
         },
         {
-          "src": "obs",
-          "content": "INVESTIGATION ROUTING (Aug 17 2026): All problem investigations and fix RECOMMENDATIONS route to Claude Code ("
-        },
-        {
           "src": "wiki",
           "content": "Interior Designer \u2014 Usage Guide: ## What to Say\n\n### Speed controls\n| Say this | Effect |\n|----------|--------"
+        },
+        {
+          "src": "obs",
+          "content": "INVESTIGATION ROUTING (Aug 17 2026): All problem investigations and fix RECOMMENDATIONS route to Claude Code ("
         },
         {
           "src": "obs",
@@ -2792,8 +2792,8 @@
       ],
       "n_sources": 2,
       "need_sources": 2,
-      "search_ms": 10.1,
-      "embed_ms": 19.3,
+      "search_ms": 10.6,
+      "embed_ms": 19.1,
       "n_hits": 20,
       "n_wiki": 9,
       "top": [

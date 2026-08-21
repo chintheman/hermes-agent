@@ -131,8 +131,20 @@ def check_hotcore(cfg):
 def check_sync(cfg):
     if not os.path.isdir(CLAUDE_MEM_DIR):
         return SKIP, "Claude Code memory dir not reachable"
-    n_files = len([f for f in os.listdir(CLAUDE_MEM_DIR)
-                   if f.endswith(".md") and f != "MEMORY.md"])
+    # Count what the sync would actually import. Counting every .md meant one
+    # malformed file produced a permanent FAIL reading "the sync is not keeping
+    # up", which points at the wrong thing entirely.
+    from spine.sync_claude_memories import parse as _parse_memory_file
+    candidates = [f for f in os.listdir(CLAUDE_MEM_DIR)
+                  if f.endswith(".md") and f != "MEMORY.md"]
+    parseable, unparseable = [], []
+    for f in candidates:
+        try:
+            (parseable if _parse_memory_file(os.path.join(CLAUDE_MEM_DIR, f))
+             else unparseable).append(f)
+        except Exception:  # noqa: BLE001
+            unparseable.append(f)
+    n_files = len(parseable)
     jsonl = os.path.join(os.path.expanduser(cfg.canonical_root), "observations",
                          f"{CC_PROFILE}.jsonl")
     if not os.path.exists(jsonl):
@@ -148,35 +160,64 @@ def check_sync(cfg):
                       f"the sync is not keeping up")
     if age_h > SYNC_STALE_HOURS:
         return FAIL, f"last sync was {age_h:.0f}h ago, expected within {SYNC_STALE_HOURS}h"
-    return OK, f"{n_rows} files mirrored, last sync {age_h:.1f}h ago"
+    note = f", {len(unparseable)} unparseable ({', '.join(unparseable[:2])})" if unparseable else ""
+    return OK, f"{n_rows} files mirrored, last sync {age_h:.1f}h ago{note}"
 
 
 def check_divergence(cfg):
-    """DB vs canonical JSONL status drift — the live rebuild trap."""
+    """DB status vs the canonical JSONL, with patch lines merged.
+
+    Two bugs before: it compared each line's top-level `status`, last-write-wins,
+    but `_write_back_status` appends {"id":..., "patch":{"status":...}} lines
+    with NO top-level status -- so any row it had ever touched read as None and
+    was treated as agreeing. Measured 2026-08-21: 190 of 421 ids, 45% of the
+    store, were invisible to this check. And it returned OK unconditionally,
+    while index.py cited it as the safety net for a swallowed write-back.
+    """
     obs_dir = os.path.join(os.path.expanduser(cfg.canonical_root), "observations")
     if not os.path.isdir(obs_dir):
         return SKIP, "canonical store not reachable"
+
     on_disk = {}
+    patches = {}
     for path in glob.glob(os.path.join(obs_dir, "*.jsonl")):
         for line in open(path, encoding="utf-8"):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "patch" in d:
+                patches.setdefault(d["id"], []).append(d["patch"])
+            else:
                 on_disk[d["id"]] = d.get("status")
+    # Same merge order load_observations() uses, so this check agrees with what
+    # a rebuild would actually produce.
+    for oid, plist in patches.items():
+        if oid not in on_disk:
+            continue
+        for patch in plist:
+            if "status" in patch:
+                on_disk[oid] = patch["status"]
+
     if not on_disk:
         return SKIP, "canonical store is empty"
+
     con = sqlite3.connect(cfg.db)
     con.execute("PRAGMA query_only = ON")
-    diff = sum(1 for i, s in con.execute("SELECT id, status FROM observations")
-               if on_disk.get(i) not in (None, s))
-    con.close()
+    try:
+        diff = [i for i, s in con.execute("SELECT id, status FROM observations")
+                if i in on_disk and on_disk[i] != s]
+    finally:
+        con.close()
+
     if diff:
-        # Not a failure in itself: this is the expected steady state until status
-        # write-back is implemented. It is reported so the number stays visible
-        # and a rebuild is never run by accident.
-        return OK, (f"{diff} rows differ between DB and JSONL — expected, but "
-                    f"rebuild-index.py would revert them; do not run it")
-    return OK, "DB and canonical store agree"
+        return FAIL, (f"{len(diff)} row(s) disagree between the DB and the canonical "
+                      f"store — a rebuild would revert them; status write-back has "
+                      f"failed somewhere (e.g. {', '.join(diff[:3])})")
+    return OK, f"DB and canonical store agree on all {len(on_disk)} rows"
 
 
 def check_consolidation(cfg):
@@ -205,11 +246,17 @@ def check_eval(cfg):
         return SKIP, "no eval baseline saved"
     try:
         base = json.load(open(baselines[-1], encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        return SKIP, f"baseline unreadable: {type(e).__name__}"
+    try:
         sys.path.insert(0, here)
         import eval_run
         now = eval_run.run("*")
-    except Exception as e:  # noqa: BLE001 — a broken gate must not mask the others
-        return SKIP, f"eval could not run: {type(e).__name__}"
+    except Exception as e:  # noqa: BLE001
+        # SKIP is for ABSENT evidence. A harness that raises is a broken tool,
+        # and this is the regression gate -- the one check that must not be able
+        # to go quietly dark.
+        return FAIL, f"eval harness failed to run: {type(e).__name__}: {e}"
     out = []
     for hop in ("single", "multi"):
         b = base.get("by_hop", {}).get(hop, {}).get("passed")
@@ -265,6 +312,10 @@ CHECKS = [
 def main() -> None:
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # spine/__init__.py imports agent.memory_provider, so the repo root has to
+    # be on the path too or a manual run dies with ModuleNotFoundError: agent.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))))
     from spine.config import load_spine_config
     cfg = load_spine_config()
 

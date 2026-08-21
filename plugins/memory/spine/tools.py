@@ -415,7 +415,10 @@ def handle_forget(args: Dict[str, Any], config: SpineConfig) -> str:
     """forget() — discovery → per-entry confirmation → ID deletion (§4.4)."""
     term = args.get("term", "")
     action = args.get("action", "discover")
-    profile = args.get("profile", "agent:main")
+    # Recall and reflect default to every profile, so a memory can be found
+    # in agent:claude-code and then reported "not found" by a forget that
+    # only looked at agent:main. Same scope for find and delete.
+    profile = args.get("profile", "*")
 
     idx = _get_index(config)
     writer = _get_writer(config, profile)

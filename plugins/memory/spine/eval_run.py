@@ -64,11 +64,20 @@ def run(profile: str = "agent:main") -> Dict[str, Any]:
             # separate memories.
             needles = case["expect_all"]
             matched = [n for n in needles if n.lower() in blob]
-            sources = {i for i, d in enumerate(docs)
-                       if any(n.lower() in d for n in needles)}
+            # Count documents that each contribute a needle the OTHERS do not.
+            # Counting docs containing *any* needle let one document holding
+            # every needle, plus one unrelated document mentioning any of them,
+            # satisfy min_sources -- exactly the case this is meant to reject.
+            per_doc = [{n for n in needles if n.lower() in d} for d in docs]
+            covered, distinct = set(), 0
+            for owned in sorted(per_doc, key=len):
+                fresh = owned - covered
+                if fresh:
+                    covered |= fresh
+                    distinct += 1
             passed = (len(matched) == len(needles)
-                      and len(sources) >= case.get("min_sources", 2))
-            n_sources = len(sources)
+                      and distinct >= case.get("min_sources", 2))
+            n_sources = distinct
         else:
             matched = [p for p in case["expect_any"] if p.lower() in blob]
             passed = bool(matched)

@@ -217,14 +217,24 @@ def structural_gate(db_path: str, bench_dir: str) -> List[str]:
             "SELECT COUNT(*) FROM observations WHERE status IN ('active','promoted')"
         ).fetchone()[0]
         wiki = conn.execute("SELECT COUNT(*) FROM wiki_chunks").fetchone()[0]
-        dim = conn.execute("SELECT value FROM dim_meta WHERE key='dim'").fetchall()
-        dim_val = dim[0][0] if dim else None
+        # Was key='dim', which does not exist -- the row is 'embedding_dim', so
+        # this check has always been dead. And it asserted 384, which is wrong
+        # since the 2026-08-21 model swap. Compare against the actual vectors
+        # instead of a hardcoded number.
+        dim = conn.execute(
+            "SELECT value FROM dim_meta WHERE key='embedding_dim'").fetchall()
+        dim_val = int(dim[0][0]) if dim else None
+        widths = {len(b) // 4 for (b,) in conn.execute(
+            "SELECT embedding FROM observations WHERE embedding IS NOT NULL LIMIT 200")
+            if isinstance(b, (bytes, memoryview))}
         if obs == 0:
             problems.append("obs_count=0 — index empty")
         if wiki == 0:
             problems.append("wiki_chunk_count=0 — wiki not indexed")
-        if dim_val not in (None, 384):
-            problems.append(f"dim_meta={dim_val} — expected 384")
+        if widths and len(widths) > 1:
+            problems.append(f"mixed vector widths {sorted(widths)} — store is corrupt")
+        elif widths and dim_val is not None and dim_val not in widths:
+            problems.append(f"dim_meta={dim_val} but vectors are {widths.pop()}-dim")
     except sqlite3.OperationalError as e:
         problems.append(f"DB read failed: {e}")
     finally:

@@ -32,6 +32,10 @@ def main() -> None:
     args = ap.parse_args()
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # spine/__init__.py imports agent.memory_provider, so the repo root has to
+    # be on the path too or a manual run dies with ModuleNotFoundError: agent.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))))
     from spine.config import load_spine_config
     from spine import coverage
     from spine.embedder import embedder_available

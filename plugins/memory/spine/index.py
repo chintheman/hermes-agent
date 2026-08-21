@@ -32,18 +32,40 @@ logger = logging.getLogger(__name__)
 # mismatch does not error -- it silently reinterprets the bytes and returns
 # nonsense similarity scores. Read it from the embedder rather than hardcoding,
 # so swapping models cannot leave a stale 384 behind.
-def _resolve_embedding_dim() -> int:
+_DEFAULT_EMBEDDING_DIM = 384
+_embedding_dim: Optional[int] = None
+
+
+def embedding_dim() -> int:
+    """Vector width, resolved lazily and cached.
+
+    Was a module-level call, which meant importing spine.index loaded a
+    SentenceTransformer: 8.1s and ~420MB on EVERY entry point, including
+    keyword-only work like forget() or a read-only heartbeat check, and a
+    ~420MB download triggered by an `import` statement on a cold machine.
+
+    Resolution order is deliberate. The store's own dim_meta wins, because the
+    width that matters is the width of the bytes already on disk. Only if the
+    store is silent do we ask the embedder.
+    """
+    global _embedding_dim
+    if _embedding_dim is not None:
+        return _embedding_dim
     try:
         from .embedder import get_embedding_dim
         d = get_embedding_dim()
         if d:
-            return int(d)
-    except Exception:  # noqa: BLE001 — embedder unavailable; keep the legacy width
+            _embedding_dim = int(d)
+            return _embedding_dim
+    except Exception:  # noqa: BLE001 — embedder unavailable right now
         pass
-    return 384
+    # Do NOT cache the fallback: a transient model-load failure must not freeze
+    # the width at 384 for the life of the process while the store holds 768.
+    return _DEFAULT_EMBEDDING_DIM
 
 
-EMBEDDING_DIM = _resolve_embedding_dim()
+def max_bytes_per_vec() -> int:
+    return embedding_dim() * 4
 
 # Recency scoring constants. NOTE (found 2026-07-30): despite the name and
 # SpineConfig having matching `recency_half_life_hours`/`recency_weight`
@@ -133,7 +155,8 @@ def _entity_match_boost(query_words: set, row: Dict[str, Any], boost: float = 1.
             return boost
     return 1.0
 
-MAX_BYTES_PER_VEC = EMBEDDING_DIM * 4  # 4 bytes per float32
+# NOTE: use max_bytes_per_vec() / embedding_dim(); the module-level constants
+# were removed so a stale width cannot be frozen at import time.
 
 # Statuses that recall is allowed to return.
 #
@@ -218,7 +241,7 @@ def _deserialize_vector(data: Any) -> Optional[List[float]]:
     """Decode a stored vector, accepting both the packed and legacy formats.
 
     Discriminate on LENGTH, not on a leading '[' byte. A packed vector is
-    always exactly EMBEDDING_DIM*4 bytes; the legacy JSON encoding of a
+    always exactly embedding_dim()*4 bytes; the legacy JSON encoding of a
     384-dim vector runs ~8.4KB and can never hit that size. Sniffing the first
     byte instead looks right but is wrong: 0x5B ('[') is a perfectly ordinary
     low mantissa byte, so roughly 1 packed vector in 256 starts with it. That
@@ -228,7 +251,7 @@ def _deserialize_vector(data: Any) -> Optional[List[float]]:
         return None
     if isinstance(data, str):
         data = data.encode("utf-8")
-    if len(data) == MAX_BYTES_PER_VEC:
+    if len(data) == max_bytes_per_vec():
         return _blob_to_vector(data)
     if data[:1] == b"[":
         try:
@@ -357,20 +380,32 @@ class MemoryIndex:
             END;
         """)
 
-        # Record embedding dimension
+        # Record the embedding dimension ONLY if the store has none yet.
+        # This was INSERT OR REPLACE on every open(), which made the guard
+        # inert: whichever process opened the DB last stamped its own width
+        # over the stored one, so a model swap without a re-embed could never
+        # be detected -- and check_embedder compared the live embedder against
+        # a value the live embedder had just written.
         self.conn.execute(
-            "INSERT OR REPLACE INTO dim_meta (key, value) VALUES (?, ?)",
-            ("embedding_dim", str(EMBEDDING_DIM)),
+            "INSERT OR IGNORE INTO dim_meta (key, value) VALUES (?, ?)",
+            ("embedding_dim", str(embedding_dim())),
         )
 
     def get_embedding_dim(self) -> int:
-        """Return the stored embedding dimension. Raises if mismatched."""
+        """The width the STORE was built at, which is what the bytes on disk are."""
         row = self.conn.execute(
             "SELECT value FROM dim_meta WHERE key='embedding_dim'"
         ).fetchone()
         if row is None:
-            return EMBEDDING_DIM
+            return embedding_dim()
         return int(row[0])
+
+    def set_embedding_dim(self, dim: int) -> None:
+        """Explicitly restamp the store's width. Only a full re-embed may call this."""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO dim_meta (key, value) VALUES (?, ?)",
+            ("embedding_dim", str(dim)),
+        )
 
     # ── Write operations ──────────────────────────────────────────────
 
@@ -743,10 +778,10 @@ def _stack(blobs: List[Any]) -> Optional["np.ndarray"]:
     # Length alone identifies the packed format — see _deserialize_vector for
     # why a leading-byte check is actively wrong here.
     for b in blobs:
-        if not isinstance(b, (bytes, memoryview)) or len(b) != MAX_BYTES_PER_VEC:
+        if not isinstance(b, (bytes, memoryview)) or len(b) != max_bytes_per_vec():
             return None
     return np.frombuffer(b"".join(bytes(b) for b in blobs),
-                         dtype="<f4").reshape(len(blobs), EMBEDDING_DIM)
+                         dtype="<f4").reshape(len(blobs), embedding_dim())
 
 
 def _similarities(query: List[float], blobs: List[Any],

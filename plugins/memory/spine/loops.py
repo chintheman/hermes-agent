@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -169,13 +170,19 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
     decayed = 0
     archived = 0
     rows = idx.conn.execute(
-        "SELECT id, confidence, last_confirmed, last_retrieved FROM observations"
+        "SELECT id, confidence, last_confirmed, last_retrieved, type FROM observations"
         " WHERE status='active' AND profile = ?",
         (profile,),
     ).fetchall()
     for row in rows:
-        obs_id, conf, last_confirmed, last_retrieved = row
+        obs_id, conf, last_confirmed, last_retrieved, obs_type = row
         if conf is None:
+            continue
+        # Corrections carry the user's explicit words — the highest-value
+        # memory class. Never let idle decay archive them; they leave active
+        # status only via explicit demote/forget or supersede (2026-08-20,
+        # compaction-prompt-tuning: preserve decisions over age).
+        if obs_type == "correction":
             continue
         # Decay: confidence −0.05 per 30 idle days
         # Use last_confirmed (or last_retrieved as fallback) to compute idle days
@@ -265,7 +272,12 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
 
     for row in auto_candidates:
         obs_id, content, obs_type, epistemic, confidence = row
-        _promote_to_hotcore(obs_id, content, obs_type, config)
+        # Only mark promoted if the write actually landed. Flipping status on a
+        # failed append strands the row forever: promote only reads 'active' so
+        # it is never retried, and demote can never excise text that was never
+        # written. It also announced promotions to Telegram that did not happen.
+        if not _promote_to_hotcore(obs_id, content, obs_type, config):
+            continue
         idx.update_status(obs_id, "promoted")
         promoted += 1
         notified.append(f"[{obs_id[:8]}] ({obs_type}, {epistemic}, conf={confidence:.2f}) {content[:100]}")
@@ -283,7 +295,8 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
 
     for row in correction_candidates:
         obs_id, content, obs_type, epistemic, confidence = row
-        _promote_to_hotcore(obs_id, content, obs_type, config)
+        if not _promote_to_hotcore(obs_id, content, obs_type, config):
+            continue
         idx.update_status(obs_id, "promoted")
         promoted += 1
         notified.append(f"[{obs_id[:8]}] (correction fast-path, conf={confidence:.2f}) {content[:100]}")
@@ -320,41 +333,65 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
             (profile,),
         ).fetchall()
 
-        blocks = _read_hotcore_blocks(mem_path)
-        unmatched = 0
-        for obs_id, content, obs_type in stale:
-            if mem_size <= HOTCORE_TARGET_BYTES:
-                break
-            remaining = _excise_block(blocks, content)
-            if remaining is None:
-                # MEMORY.md has a second writer: the memory() tool and the
-                # LLM-assisted consolidation pass rewrite and merge blocks
-                # wholesale, so a promoted row's text may no longer appear
-                # verbatim. Leave the row promoted rather than demoting a row
-                # whose text we could not remove -- doing that empties the DB's
-                # view of the hot core while the file itself stays fat.
-                unmatched += 1
-                continue
-            blocks = remaining
-            mem_size = len("\n§\n".join(blocks)) + 1
-            # 'demoted' stays searchable (it is in SEARCHABLE_STATUSES) but is
-            # never re-promoted, because the promote pass only reads 'active'.
-            idx.update_status(obs_id, "demoted")
-            demoted += 1
+        # Whole read-modify-write under the lock. Deciding what to excise from a
+        # snapshot and then replacing the file is only safe if no other writer
+        # can append in between; memory() can and does.
+        with _hotcore_lock():
+            blocks = _read_hotcore_blocks(mem_path)
+            unmatched = 0
+            demote_ids: List[str] = []
 
-        if demoted:
-            _write_hotcore_blocks(mem_path, blocks)
-            mem_size = os.path.getsize(mem_path)
+            for obs_id, content, obs_type in stale:
+                if mem_size <= HOTCORE_TARGET_BYTES:
+                    break
+                remaining = _excise_block(blocks, content)
+                if remaining is None:
+                    # MEMORY.md has a second writer: the memory() tool and the
+                    # LLM-assisted consolidation pass rewrite and merge blocks
+                    # wholesale, so a promoted row's text may no longer appear
+                    # verbatim. Leave the row promoted rather than demoting one
+                    # whose text could not be removed -- doing that empties the
+                    # DB's view of the hot core while the file stays fat.
+                    unmatched += 1
+                    continue
+                blocks = remaining
+                # Bytes, not characters: every threshold here comes from
+                # os.path.getsize. The live file is 17,309 chars / 17,515 bytes,
+                # so a char count under-reads by ~1.2% and stops the loop early.
+                mem_size = len(("\n§\n".join(blocks) + "\n").encode("utf-8"))
+                demote_ids.append(obs_id)
+                demoted += 1
 
-        if mem_size > 20000 and unmatched:
+            if demoted:
+                # Durable state BEFORE the irreversible file write. The reverse
+                # order left a crash window where MEMORY.md had lost the blocks
+                # but the DB still called them promoted -- drift no check sees.
+                # 'demoted' stays searchable (it is in SEARCHABLE_STATUSES) but
+                # is never re-promoted: the promote pass only reads 'active'.
+                for oid in demote_ids:
+                    idx.update_status(oid, "demoted")
+                idx.conn.commit()
+                _write_hotcore_blocks(mem_path, blocks)
+                mem_size = os.path.getsize(mem_path)
+
+
+        # Gate on the state, not on why. The previous version only warned when a
+        # promoted row could not be matched, which is the RARE case; the common
+        # one is simply running out of promoted rows to demote, where
+        # `unmatched` is 0. Verified live: 2026-08-18 finished at 32,481 bytes,
+        # 62% over budget, and reported "demoted 2 stale entries" with no
+        # warning at all. A human had to rescue the file.
+        if mem_size > 20000:
             # Say so loudly. A pass that runs nightly, removes nothing, and
             # reports success is exactly how the embedder outage went unseen
             # for eight days.
+            why = (f"{unmatched} promoted observation(s) could not be matched to a "
+                   f"block" if unmatched else
+                   "there are no promoted observations left to demote")
             warning = (
-                f"MEMORY.md is {mem_size:,} bytes, over the {20000:,} budget, and "
-                f"{unmatched} promoted observation(s) could not be matched to a "
-                f"block -- spine cannot shrink the file on its own. Run the "
-                f"LLM-assisted consolidation pass."
+                f"MEMORY.md is {mem_size:,} bytes, over the {20000:,} budget: {why}. "
+                f"Spine cannot shrink the file on its own — run the LLM-assisted "
+                f"consolidation pass."
             )
             report.setdefault("warnings", []).append(warning)
             logger.warning(warning)
@@ -387,6 +424,39 @@ _TAG_MAP = {
     "fact": "[F]",
     "identity": "[ID]",
 }
+
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — Unix only; degrade to no locking
+    fcntl = None
+
+
+@contextmanager
+def _hotcore_lock():
+    """Exclusive lock on MEMORY.md, using the SAME sidecar the other writer uses.
+
+    Hermes's memory() tool (tools/memory_tool.py `_file_lock`) holds an flock on
+    `MEMORY.md.lock` across its own read-modify-write. The demote pass rewrites
+    the whole file, so without taking that same lock a memory() append landing
+    mid-pass is silently discarded by our os.replace -- and by definition a
+    just-written hot-core entry exists nowhere else yet.
+    """
+    path = _hotcore_path() + ".lock"
+    if fcntl is None:
+        yield
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = open(path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fd.close()
 
 
 def _hotcore_path() -> str:
@@ -434,8 +504,14 @@ def _excise_block(blocks: List[str], content: str) -> Optional[List[str]]:
     the others.
     """
     target = content.strip()
-    remaining = [b for b in blocks if _block_body(b) != target]
-    return remaining if len(remaining) != len(blocks) else None
+    for i, b in enumerate(blocks):
+        if _block_body(b) == target:
+            # Exactly one, as the docstring says. Removing every match meant a
+            # legacy "[R] foo" and a promoted "[F] foo" both vanished when a
+            # single row was demoted, and the promote path's dedupe compares the
+            # full tagged string so those two are legitimately distinct entries.
+            return blocks[:i] + blocks[i + 1:]
+    return None
 
 
 def _promote_to_hotcore(obs_id: str, content: str, obs_type: str, config: SpineConfig) -> bool:
@@ -451,11 +527,14 @@ def _promote_to_hotcore(obs_id: str, content: str, obs_type: str, config: SpineC
     entry = _hotcore_entry(content, obs_type)
 
     try:
-        if entry in _read_hotcore_blocks(mem_path):
-            logger.debug("Skipped promoting %s — already in MEMORY.md", obs_id)
-            return False
-        with open(mem_path, "a", encoding="utf-8") as f:
-            f.write(f"\n§\n{entry}\n")
+        # Same lock as the rewrite path and as memory(): the dedupe check is a
+        # read-then-append, so without it two writers can both see "absent".
+        with _hotcore_lock():
+            if entry in _read_hotcore_blocks(mem_path):
+                logger.debug("Skipped promoting %s — already in MEMORY.md", obs_id)
+                return False
+            with open(mem_path, "a", encoding="utf-8") as f:
+                f.write(f"\n§\n{entry}\n")
         logger.info("Promoted %s to MEMORY.md: %s", obs_id, content[:80])
         return True
     except Exception as e:

@@ -115,6 +115,10 @@ def main() -> None:
     args = ap.parse_args()
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    # spine/__init__.py imports agent.memory_provider, so the repo root has to
+    # be on the path too or a manual run dies with ModuleNotFoundError: agent.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))))
     from spine.config import load_spine_config
     from spine.index import MemoryIndex
     from spine.embedder import embedder_available, embed_single
@@ -130,13 +134,29 @@ def main() -> None:
 
     # Preserve created_at from the existing copy so a re-sync doesn't reset the
     # age of every memory and hand the recency scorer a corpus that looks new.
+    # Merge patch lines the way load_observations() does. Reading them as plain
+    # records (last-write-wins) meant a patched row -- which has no created_at --
+    # fell through to `now`, RESETTING the observation's age, which is exactly
+    # what the carry-over below exists to prevent. It also forced a re-embed.
     prior = {}
+    prior_patches = {}
     if os.path.exists(out):
         for line in open(out, encoding="utf-8"):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "patch" in d:
+                prior_patches.setdefault(d["id"], []).append(d["patch"])
+            else:
                 prior[d["id"]] = d
+    for oid, plist in prior_patches.items():
+        if oid in prior:
+            for patch in plist:
+                prior[oid].update(patch)
     added = changed = unchanged = 0
     for r in recs:
         p = prior.get(r["id"])
@@ -149,7 +169,10 @@ def main() -> None:
             unchanged += 1
             r["created_at"] = p.get("created_at", r["created_at"])
             r["last_confirmed"] = p.get("last_confirmed", r["last_confirmed"])
-    removed = sorted(set(prior) - {r["id"] for r in recs})
+    # A file that failed to parse is NOT a deletion. Treating it as one turned
+    # "you broke the frontmatter" into "this memory is silently unretrievable".
+    skipped_ids = {stable_id(f) for f in skipped}
+    removed = sorted(set(prior) - {r["id"] for r in recs} - skipped_ids)
 
     print(f"profile   : {PROFILE}")
     print(f"files     : {len(recs)} parsed, {len(skipped)} skipped {skipped}")
@@ -167,11 +190,17 @@ def main() -> None:
         # keyword-only, which is exactly how the embedder outage hid for 8 days.
         sys.exit("refusing to sync: embedder unavailable, would write rows without vectors")
 
+    # Under the same lock JSONLWriter uses for this file. A concurrent status
+    # patch would otherwise land on the old inode and be discarded by the
+    # replace below.
+    from spine.jsonl_writer import JSONLWriter
+    writer = JSONLWriter(out)
     tmp = out + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        for r in recs:
-            f.write(json.dumps(r, sort_keys=True) + "\n")
-    os.replace(tmp, out)
+    with writer._lock():
+        with open(tmp, "w", encoding="utf-8") as f:
+            for r in recs:
+                f.write(json.dumps(r, sort_keys=True) + "\n")
+        os.replace(tmp, out)
 
     idx = MemoryIndex(config.db)
     idx.open()

@@ -105,6 +105,13 @@ def format_report(report: Dict[str, Any]) -> str:
         if len(promoted) > 5:
             lines.append(f"  …and {len(promoted) - 5} more (revert via forget() if wrong)")
 
+    # Warnings were written to the JSON report but never rendered, so the demote
+    # pass's "say so loudly" message never reached the nightly Telegram delivery
+    # that is the only thing anyone actually reads.
+    for w in report.get("warnings") or []:
+        lines.append("")
+        lines.append(f"⚠️  {w}")
+
     return "\n".join(lines)
 
 

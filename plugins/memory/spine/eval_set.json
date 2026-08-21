@@ -1,5 +1,5 @@
 {
-  "_about": "Spine retrieval gate. Two sections. SINGLE-HOP cases pass when any expect_any phrase appears in top-k. MULTI-HOP cases pass only when EVERY expect_all phrase appears AND they arrive from at least min_sources distinct documents -- without that second constraint one large memory containing all the phrases would fake a multi-hop pass. Sections are scored separately: averaging them hides which capability moved. No spine change ships without a before/after run.",
+  "_about": "Spine retrieval gate. Two sections. SINGLE-HOP cases pass when any expect_any phrase appears in top-k. MULTI-HOP cases pass only when EVERY expect_all phrase appears AND they arrive from at least min_sources distinct documents -- without that second constraint one large memory containing all the phrases would fake a multi-hop pass. Sections are scored separately: averaging them hides which capability moved. No spine change ships without a before/after run. Needles must be specific enough to fail on an unrelated query: short unanchored substrings like 'rce' match 'source' and 'force'.",
   "k": 20,
   "cases": [
     {
@@ -184,8 +184,8 @@
       "id": "mh-zo-safe-publish",
       "q": "what is the safe way for an agent to publish something to Zo",
       "expect_all": [
-        "mcp",
-        "rce"
+        "mcp first",
+        "unauthenticated"
       ],
       "min_sources": 2,
       "hop": "multi"
@@ -205,7 +205,7 @@
       "id": "mh-blocked-cli",
       "q": "a shell command is blocked for Claude Code, what should I try before asking Chin",
       "expect_all": [
-        "hermes",
+        "hermes chat",
         "classifier"
       ],
       "min_sources": 2,
@@ -280,7 +280,7 @@
         "sync",
         "4 hours"
       ],
-      "min_sources": 1,
+      "min_sources": 2,
       "note": "Added 2026-08-20. Expected to FAIL until the sync cron has run once after the memory file was written -- it measures the freshness gap on purpose.",
       "hop": "multi"
     },
