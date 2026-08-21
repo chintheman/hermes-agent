@@ -450,8 +450,19 @@ async def test_session_chat_stream_treats_pre_existing_poisoned_row_as_no_model(
                 json={"message": "hi"},
             )
             assert resp.status == 200
+            # Drain the SSE body BEFORE the client context exits. aiohttp's
+            # TestClient returns as soon as the 200 headers arrive and close()
+            # does not read the body — exiting right after the assert closes the
+            # connection, the server read loop sees the disconnect and CANCELLS
+            # the background run task. If the task is still awaiting the history
+            # load it never reaches _run_agent, so mock_run.call_args is None
+            # (flaky red under CI load; deterministic locally). Reading the body
+            # waits for the stream to end, which happens only after the run task
+            # completes. The other stream tests in this file read resp.text() for
+            # the same reason.
+            await resp.read()
 
-    _, kwargs = mock_run.call_args
+        _, kwargs = mock_run.call_args
     assert kwargs["session_model"] is None
 
 
