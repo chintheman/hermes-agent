@@ -40,6 +40,7 @@ def _make_agent(platform="", **overrides):
         skip_context_files=False,
         valid_tool_names=[],
         _task_completion_guidance=False,
+        _parallel_tool_call_guidance=False,
         _tool_use_enforcement=False,
         _adhd_output_rules=False,
         _environment_probe=False,

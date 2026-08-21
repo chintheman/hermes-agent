@@ -88,14 +88,19 @@ def _default_registry_path() -> Path:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    # psutil.pid_exists is the canonical cross-platform liveness probe —
-    # os.kill(pid, 0) is a silent process-killer on Windows (sends
-    # CTRL_C_EVENT to the target's console group, bpo-14484). psutil is a
-    # core dependency (see pyproject.toml "Cross-platform process / PID
-    # management").
-    import psutil
+    # Delegate to the canonical, cross-platform, footgun-safe liveness check
+    # (psutil with ctypes/POSIX fallback; zombies reported dead per #42126).
+    # Avoids os.kill(pid, 0), which on Windows is NOT a no-op — it routes to
+    # CTRL_C_EVENT and hard-kills the target's console process group
+    # (bpo-14484). Any error resolves to False (treat unknown as dead) so a
+    # corrupt on-disk host_pid (e.g. 2**63) self-heals instead of wedging the
+    # orphan-reconciliation path.
+    try:
+        from gateway.status import _pid_exists
 
-    return psutil.pid_exists(pid)
+        return bool(_pid_exists(pid))
+    except Exception:
+        return False
 
 
 def _pid_command(pid: int) -> str:
