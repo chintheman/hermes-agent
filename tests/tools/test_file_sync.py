@@ -234,11 +234,11 @@ class TestRateLimiting:
 
         Regression: ``_last_sync_time`` was seeded ``0.0`` and the guard was
         ``now - 0.0 < sync_interval``, so on a process whose monotonic clock
-        was still below the interval (container cold start, fresh VM, CI
-        runner) the FIRST non-forced sync() returned early — silently
-        suppressing the retry the rollback path had just prepared. The None
-        sentinel makes the first call unconditional. Red against the ``0.0``
-        seed (2.0 - 0.0 < 10.0), green with None.
+        was still below the interval (fresh VM/microVM boot, time-namespaced
+        container) the FIRST non-forced sync() returned early — silently
+        skipping the initial upload entirely. The None sentinel makes the
+        first call unconditional. Red against the ``0.0`` seed (2.0 - 0.0 <
+        10.0), green with None.
         """
         from tools.environments import file_sync
 

@@ -295,7 +295,12 @@ def _goal_mode_handoff_rejection(task, evidence: str) -> Optional[str]:
 #     explicit tool which carries a model-supplied note.
 
 _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
-_auto_heartbeat_last_attempt: float = 0.0
+# None = never attempted. A float seed of 0.0 is boot-relative-wrong: on a
+# machine whose monotonic clock is below the interval (fresh VM/microVM boot,
+# time-namespaced container) the FIRST heartbeat would be suppressed — one
+# missed claim-extension beat against the claim TTL. Same sentinel shape as
+# tools/environments/file_sync.py.
+_auto_heartbeat_last_attempt: Optional[float] = None
 
 
 def heartbeat_current_worker_from_env() -> bool:
@@ -325,7 +330,10 @@ def heartbeat_current_worker_from_env() -> bool:
         return False
     import time as _time
     now = _time.monotonic()
-    if (now - _auto_heartbeat_last_attempt) < _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS:
+    if (
+        _auto_heartbeat_last_attempt is not None
+        and (now - _auto_heartbeat_last_attempt) < _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS
+    ):
         return False
     _auto_heartbeat_last_attempt = now
     try:
@@ -363,7 +371,10 @@ def heartbeat_current_worker_from_env() -> bool:
 # dance (or a restart). Rate-limited on its own (tighter than the 60s heartbeat
 # so notes land within a few seconds), watermarked per task id.
 _COMMENT_POLL_MIN_INTERVAL_SECONDS = 6.0
-_comment_poll_last_attempt: float = 0.0
+# None = never attempted; same boot-relative rationale as the heartbeat
+# limiter above — a 0.0 seed suppresses the first poll on a young machine,
+# landing operator comments one poll late.
+_comment_poll_last_attempt: Optional[float] = None
 # task_id -> highest comment id already seen (seeded on first poll so history
 # already present in build_worker_context isn't re-injected).
 _comment_watermark: dict[str, int] = {}
@@ -387,7 +398,10 @@ def inject_new_comments_from_env(agent: Any) -> bool:
     global _comment_poll_last_attempt
     import time as _time
     now = _time.monotonic()
-    if (now - _comment_poll_last_attempt) < _COMMENT_POLL_MIN_INTERVAL_SECONDS:
+    if (
+        _comment_poll_last_attempt is not None
+        and (now - _comment_poll_last_attempt) < _COMMENT_POLL_MIN_INTERVAL_SECONDS
+    ):
         return False
     _comment_poll_last_attempt = now
 

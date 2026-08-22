@@ -179,7 +179,15 @@ async def test_runner_goal_hook_enqueues_into_the_key_the_adapter_drains(hermes_
     adapter = _DrainProbeAdapter()
     runner.adapters = {Platform.SLACK: adapter}
 
-    GoalManager(session_entry.session_id).set("ship it")
+    # Set the goal off-loop: on an event-loop thread a SessionDB cache miss
+    # kicks a background bootstrap and returns None (goals.py _get_session_db),
+    # making set() a silent no-op — under CI load the bootstrap can exceed the
+    # grace window, the goal never persists, _post_turn_goal_continuation sees
+    # no active goal, and the continuation is never enqueued (flake in slice
+    # 4/12; same shape 6c411665 fixed in test_loop_command).
+    await asyncio.to_thread(
+        lambda: GoalManager(session_entry.session_id).set("ship it")
+    )
     with patch(
         "hermes_cli.goals.judge_goal",
         return_value=("continue", "still needs work", False, None, False),

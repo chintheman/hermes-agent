@@ -49,13 +49,15 @@ def worker_home(tmp_path, monkeypatch):
     kb._INITIALIZED_PATHS.clear()
     # Reset module-level poll state so tests don't leak into each other.
     kt._comment_watermark.clear()
-    kt._comment_poll_last_attempt = 0.0
+    kt._comment_poll_last_attempt = None
+    kt._auto_heartbeat_last_attempt = None
     return home
 
 
 def _unthrottle():
     """Bypass the inter-poll rate limit for deterministic tests."""
-    kt._comment_poll_last_attempt = 0.0
+    kt._comment_poll_last_attempt = None
+    kt._auto_heartbeat_last_attempt = None
 
 
 def test_noop_without_worker_env(worker_home, monkeypatch):
@@ -122,3 +124,49 @@ def test_skips_own_authored_comments(worker_home, monkeypatch):
     _unthrottle()
     assert kt.inject_new_comments_from_env(agent) is False
     assert agent.steers == []
+
+
+def test_first_heartbeat_runs_on_a_young_process(worker_home, monkeypatch):
+    """A never-attempted auto-heartbeat must not be rate-limited on a young process.
+
+    Regression: ``_auto_heartbeat_last_attempt`` was seeded ``0.0`` and the
+    guard was ``now - 0.0 < 60.0``, so on a machine whose monotonic clock was
+    still below the interval (fresh VM/microVM boot, time-namespaced
+    container) the FIRST claim-extension heartbeat was suppressed — one
+    missed beat against the claim TTL. The None sentinel makes the first
+    call unconditional. Red against the ``0.0`` seed (2.0 - 0.0 < 60.0),
+    green with None.
+    """
+    import time as real_time
+
+    clock = {"t": 2.0}  # monotonic() < heartbeat interval
+    monkeypatch.setattr(real_time, "monotonic", lambda: clock["t"])
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "task-young-process")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "42")
+
+    heartbeats: list[tuple[str, str]] = []
+
+    class _FakeKb:
+        def heartbeat_claim(self, conn, tid, claimer=None):
+            heartbeats.append(("claim", tid))
+
+        def heartbeat_worker(self, conn, tid, note=None, expected_run_id=None):
+            heartbeats.append(("worker", tid))
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(kt, "_connect", lambda board=None: (_FakeKb(), _FakeConn()))
+
+    # First call on a young process must be attempted, not suppressed.
+    assert kt.heartbeat_current_worker_from_env() is True
+    assert heartbeats == [("claim", "task-young-process"), ("worker", "task-young-process")], (
+        "never-attempted heartbeat must not be rate-limited on a young process"
+    )
+
+    # Second call within the interval is still rate-limited (limiter intact).
+    heartbeats.clear()
+    clock["t"] = 2.5
+    assert kt.heartbeat_current_worker_from_env() is False
+    assert heartbeats == []
