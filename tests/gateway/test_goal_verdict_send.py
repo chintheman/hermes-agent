@@ -106,8 +106,13 @@ async def test_goal_verdict_continue_enqueues_continuation(hermes_home):
 
     from hermes_cli.goals import GoalManager
 
-    mgr = GoalManager(session_entry.session_id)
-    mgr.set("polish the docs")
+    # Set the goal off-loop: on an event-loop thread a SessionDB cache miss
+    # kicks a background bootstrap and returns None (goals.py _get_session_db),
+    # making set() a silent no-op under CI load (same shape as the slice-4/12
+    # flake in test_goal_continuation_drain.py).
+    await asyncio.to_thread(
+        lambda: GoalManager(session_entry.session_id).set("polish the docs")
+    )
 
     with patch("hermes_cli.goals.judge_goal", return_value=("continue", "still needs work", False, None, False)):
         await runner._post_turn_goal_continuation(
@@ -132,10 +137,17 @@ async def test_goal_verdict_budget_exhausted_sends_pause(hermes_home):
 
     from hermes_cli.goals import GoalManager, save_goal
 
-    mgr = GoalManager(session_entry.session_id, default_max_turns=2)
-    state = mgr.set("tiny goal", max_turns=2)
-    state.turns_used = 2
-    save_goal(session_entry.session_id, state)
+    # Whole set→mutate→save sequence off-loop: GoalManager.set() on an
+    # event-loop thread silently no-ops when the SessionDB bootstrap exceeds
+    # the grace window (goals.py _get_session_db); the budget state must be
+    # persisted deterministically before _post_turn_goal_continuation reads it.
+    def _seed_exhausted_goal():
+        mgr = GoalManager(session_entry.session_id, default_max_turns=2)
+        state = mgr.set("tiny goal", max_turns=2)
+        state.turns_used = 2
+        save_goal(session_entry.session_id, state)
+
+    await asyncio.to_thread(_seed_exhausted_goal)
 
     with patch("hermes_cli.goals.judge_goal", return_value=("continue", "keep going", False, None, False)):
         await runner._post_turn_goal_continuation(

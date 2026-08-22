@@ -57,7 +57,16 @@ def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
                         "command": sys.executable,
                         "args": [str(server)],
                     }
-                }
+                },
+                # Default mcp_discovery_timeout is 1.5s; the slash worker's
+                # wait_for_mcp_discovery is capped by it. Under CI load (8
+                # parallel test slices) the stdio server's cold-start +
+                # handshake can exceed 1.5s, the discovery thread is still
+                # running when /tools snapshots, and the probe tool is missing
+                # — a load flake, not a discovery regression. Raise the bound
+                # here; wait_for_mcp_discovery returns the instant discovery
+                # completes, so fast servers still pay ~0.
+                "mcp_discovery_timeout": 15,
             }
         ),
         encoding="utf-8",
