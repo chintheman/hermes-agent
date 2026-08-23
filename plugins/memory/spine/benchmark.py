@@ -397,6 +397,12 @@ def main() -> None:
                 print(f"  {metric}: {info['current']:.3f} vs {info['baseline']:.3f} ({info['pct_change']:+.1f}%) — {flag}")
             if regression["regression"]:
                 print("\n⚠️ REGRESSION >5% DETECTED — block this change.")
+                # P1-2 (2026-08-23): this used to print the warning and exit 0,
+                # so the weekly cron showed "ok" while recall sat -5.6% below
+                # baseline for weeks. The heartbeat only speaks on failures; a
+                # bench that exits 0 is a bench that never spoke. Non-zero exit
+                # makes the cron run FAIL and the Cron Health Watchdog re-flag it.
+                sys.exit(3)
 
         if args.set_baseline:
             baseline_path = Path(args.bench_dir) / "baseline.json"

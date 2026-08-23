@@ -17,6 +17,9 @@ Every check below is an incident that already happened, not a hypothetical:
               back to the canonical JSONL, so a rebuild silently reverts
               demotions and re-inflates the hot core.
   consolidate The nightly consolidation ran for weeks doing nothing at all.
+  proposals   Hermes proposes Claude Code memories but never writes them. A
+              queue nobody reviews is the same failure as a hot core nobody
+              trims: it just sits there until someone happens to look.
   eval        A regression nobody notices is the whole point of this file.
 
 DESIGN RULE, from Chin's own alerting principle: never fire on missing data.
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import glob
 import json
+import re
 import os
 import sqlite3
 import sys
@@ -37,9 +41,14 @@ import time
 
 OK, FAIL, SKIP = "OK", "FAIL", "SKIP"
 
+# Must match propose_memories.EXPORT_PREFIX. Compared against the raw evidence
+# JSON so this check needs no import from that module.
+EXPORT_MARK = "exported to claude-code memory: "
+
 MEM_MD = os.path.expanduser("~/.hermes/memories/MEMORY.md")
 CLAUDE_MEM_DIR = os.path.expanduser("~/.claude/projects/-Users-0xsteamboat/memory")
 CC_PROFILE = "agent:claude-code"
+PROPOSAL_DIR = os.path.expanduser("~/.hermes/proposals/claude-memory")
 
 HOTCORE_WARN_BYTES = 20000        # spine's own demote trigger
 SYNC_STALE_HOURS = 12             # cron runs every 4h; 3 misses is a real fault
@@ -358,15 +367,121 @@ def check_hotcore_coverage(cfg):
     return OK, f"all {total} hot-core blocks retrievable from spine"
 
 
+def check_proposals(cfg):
+    """Two ways the Hermes -> Claude Code write path fails silently.
+
+    Pending: a proposal is written and then nobody reviews it. Nothing breaks,
+    so nothing complains, and the queue just sits there.
+
+    Unmarked: a proposal is promoted into ~/.claude but the source spine row is
+    never stamped exported. Nothing looks wrong, and the row is proposed again
+    on every future run. The 4h sync then returns the promoted file as an
+    agent:claude-code observation while agent:main still holds the original, so
+    the duplicate compounds rather than sitting still.
+    """
+    if not os.path.isdir(PROPOSAL_DIR):
+        return SKIP, "no proposal queue"
+
+    pending = [f for f in glob.glob(os.path.join(PROPOSAL_DIR, "*.md"))]
+    problems = []
+    if pending:
+        oldest = min(os.path.getmtime(f) for f in pending)
+        age_d = (time.time() - oldest) / 86400
+        problems.append(f"{len(pending)} proposal(s) awaiting review, oldest {age_d:.0f}d old")
+
+    if not os.path.isdir(CLAUDE_MEM_DIR):
+        return (FAIL, "; ".join(problems)) if problems else (SKIP, "Claude Code memory dir not reachable")
+
+    promoted = {}
+    for path in glob.glob(os.path.join(CLAUDE_MEM_DIR, "*.md")):
+        if os.path.basename(path) == "MEMORY.md":
+            continue
+        try:
+            head = open(path, encoding="utf-8").read(2000)
+        except OSError:
+            continue
+        m = re.search(r"^\s*source_obs_id:\s*(\S+)\s*$", head, re.M)
+        if m:
+            promoted[m.group(1)] = os.path.basename(path)
+
+    if promoted:
+        con = sqlite3.connect(f"file:{cfg.db}?immutable=1", uri=True)
+        try:
+            qs = ",".join("?" * len(promoted))
+            rows = dict(con.execute(
+                f"SELECT id, evidence FROM observations WHERE id IN ({qs})",
+                list(promoted)).fetchall())
+        finally:
+            con.close()
+        unmarked = []
+        for oid, fname in sorted(promoted.items()):
+            ev = rows.get(oid)
+            if ev is None:
+                continue  # row is gone from this profile; not this check's job
+            if EXPORT_MARK not in (ev or ""):
+                unmarked.append(fname)
+        if unmarked:
+            problems.append(
+                f"{len(unmarked)} promoted memor(y/ies) whose spine row is not marked "
+                f"exported and will be proposed again: {', '.join(unmarked[:3])}"
+                + (" ..." if len(unmarked) > 3 else ""))
+
+    if problems:
+        return FAIL, "; ".join(problems)
+    return OK, f"no proposals pending, {len(promoted)} promoted memories marked exported"
+
+
+def check_fts_index(cfg):
+    """Watch the FTS index for phantom-document drift and tokenizer regressions.
+
+    2026-08-23: the index held 2,082 docs against 521 real observations (75%
+    phantoms) and 4,952 against 2,643 wiki chunks. INSERT OR REPLACE did not
+    fire the FTS delete trigger (recursive_triggers was off), so every re-write
+    leaked a stale document. count(*) on an external-content FTS table reads
+    the CONTENT table (looks right), integrity-check validates structure only,
+    and search_fts JOINs orphans away from results — so it was invisible to
+    every existing check while bm25 computed every IDF against a
+    majority-ghost corpus. The docsize shadow table is the one count that
+    reflects the index itself.
+    """
+    con = sqlite3.connect(cfg.db)
+    con.execute("PRAGMA query_only = ON")
+    try:
+        problems = []
+        for tbl, src in (("observations_fts", "observations"),
+                         ("wiki_chunks_fts", "wiki_chunks")):
+            indexed = con.execute(
+                f"SELECT count(*) FROM {tbl}_docsize").fetchone()[0]
+            real = con.execute(
+                f"SELECT count(*) FROM {src}").fetchone()[0]
+            if indexed != real:
+                problems.append(
+                    f"{tbl} indexes {indexed} docs but {src} has {real} "
+                    f"rows ({indexed - real} phantoms)")
+            row = con.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (tbl,)).fetchone()
+            if not row or "porter" not in (row[0] or ""):
+                problems.append(
+                    f"{tbl} missing porter tokenizer — stemming broken")
+    finally:
+        con.close()
+    if problems:
+        return FAIL, "; ".join(problems)
+    return OK, "obs/wiki FTS indexes match row counts, porter tokenizer present"
+
+
 CHECKS = [
     ("embedder", check_embedder),
     ("vectors", check_vectors),
     ("vector_width", check_vector_width),
+    ("fts_index", check_fts_index),
     ("hotcore", check_hotcore),
     ("hotcore_coverage", check_hotcore_coverage),
     ("sync", check_sync),
     ("divergence", check_divergence),
     ("consolidation", check_consolidation),
+    ("proposals", check_proposals),
     ("eval", check_eval),
 ]
 

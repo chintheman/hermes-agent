@@ -85,8 +85,28 @@ def embedding_dim() -> int:
             return _embedding_dim
     except Exception:  # noqa: BLE001 — embedder unavailable right now
         pass
+    # Last resort: ask the DATA. A hardcoded fallback is how dim_meta ended up
+    # claiming 384 over a store of 3,127 768-dim vectors — the probe failed once
+    # (locked DB or embedder not yet loaded) and the constant got stamped in.
+    # The stored vectors cannot be wrong about their own width.
+    try:
+        import sqlite3 as _sq
+        from .config import load_spine_config
+        db = os.path.expanduser(load_spine_config().db)
+        if os.path.exists(db):
+            con = _sq.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+            try:
+                row = con.execute(
+                    "SELECT LENGTH(embedding) FROM observations "
+                    "WHERE embedding IS NOT NULL LIMIT 1").fetchone()
+            finally:
+                con.close()
+            if row and row[0]:
+                return int(row[0]) // 4
+    except Exception:  # noqa: BLE001
+        pass
     # Do NOT cache the fallback: a transient model-load failure must not freeze
-    # the width at 384 for the life of the process while the store holds 768.
+    # the width for the life of the process.
     return _DEFAULT_EMBEDDING_DIM
 
 
@@ -310,6 +330,15 @@ class MemoryIndex:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # INSERT OR REPLACE resolves a conflict by deleting the old row, but that
+        # delete does NOT fire AFTER DELETE triggers unless recursive_triggers is
+        # ON (SQLite default is OFF). With it off, upsert_observation() and the
+        # wiki reindex leaked a stale FTS document on every re-write: the index
+        # held 2,082 docs against 521 real rows (75% phantoms) and every IDF was
+        # computed against a majority-ghost corpus. Set it per-connection in
+        # open() so every writer (incl. rebuild-index.py, which also goes through
+        # MemoryIndex.open()) is covered.
+        self._conn.execute("PRAGMA recursive_triggers = ON")
         self._create_schema()
 
     def close(self) -> None:
@@ -365,10 +394,16 @@ class MemoryIndex:
             );
 
             -- FTS5 virtual table for full-text search (external content to observations)
+            -- tokenize='porter unicode61' added 2026-08-23: unicode61 alone has no
+            -- stemming, so "report" never matched "reporting" and a whole class of
+            -- verb-form queries scored zero on the FTS channel (spine eval regression
+            -- mh-verification-discipline). Existing DBs are migrated by
+            -- _migrate_fts_tokenizer(); CREATE IF NOT EXISTS is a silent no-op.
             CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
                 content,
                 content_rowid='rowid',
-                content='observations'
+                content='observations',
+                tokenize='porter unicode61'
             );
 
             -- Triggers to keep FTS5 in sync
@@ -389,7 +424,8 @@ class MemoryIndex:
             CREATE VIRTUAL TABLE IF NOT EXISTS wiki_chunks_fts USING fts5(
                 content,
                 content_rowid='rowid',
-                content='wiki_chunks'
+                content='wiki_chunks',
+                tokenize='porter unicode61'
             );
 
             CREATE TRIGGER IF NOT EXISTS wiki_chunks_ai AFTER INSERT ON wiki_chunks BEGIN
@@ -416,6 +452,33 @@ class MemoryIndex:
             "INSERT OR IGNORE INTO dim_meta (key, value) VALUES (?, ?)",
             ("embedding_dim", str(embedding_dim())),
         )
+
+        self._migrate_fts_tokenizer()
+
+    def _migrate_fts_tokenizer(self) -> None:
+        """Recreate FTS5 tables whose stored DDL predates porter stemming.
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS is a silent no-op against an existing
+        table, so changing the tokenizer in the DDL above does nothing to a live
+        DB. Detect the drift and rebuild. Also repairs orphaned index entries
+        left by INSERT OR REPLACE before recursive_triggers was turned on.
+        """
+        for tbl, src in (("observations_fts", "observations"),
+                         ("wiki_chunks_fts", "wiki_chunks")):
+            row = self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+            ).fetchone()
+            if not row or "porter" in row[0]:
+                continue
+            self.conn.executescript(f"""
+                BEGIN;
+                DROP TABLE {tbl};
+                CREATE VIRTUAL TABLE {tbl} USING fts5(
+                    content, content_rowid='rowid', content='{src}',
+                    tokenize='porter unicode61');
+                INSERT INTO {tbl}({tbl}) VALUES('rebuild');
+                COMMIT;
+            """)
 
     def get_embedding_dim(self) -> int:
         """The width the STORE was built at, which is what the bytes on disk are."""
