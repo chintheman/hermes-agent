@@ -26,8 +26,11 @@ Available fields:
 set, so a footer whose ``fields`` are unset renders exactly as before.
 
 ``rate_windows`` (optional) — time-of-use pricing windows, keyed by model
-substring (matched case-insensitively against the bare model id). Peak hours
-are half-open ``[start, end)`` in the window's timezone::
+substring (matched case-insensitively against the bare model id). When
+several keys match a model, the LONGEST key wins, so a specific matcher
+(``deepseek-v4-flash``) always beats a generic one (``deepseek``) regardless
+of config order. Peak hours are half-open ``[start, end)`` in the window's
+timezone and may wrap midnight (``[[22, 2]]`` = 22:00–01:59, all peak)::
 
     display:
       runtime_footer:
@@ -37,10 +40,20 @@ are half-open ``[start, end)`` in the window's timezone::
           deepseek:                       # model matcher
             tz: Asia/Singapore            # optional, default UTC
             peak: [[9, 12], [14, 18]]     # half-open hours in that tz
+            off_peak_days:                # optional: all-day off-peak rule
+              tz: Asia/Shanghai           #   weekday checked in THIS tz
+              days: [sat, sun]            #   never the UTC date
+
+``off_peak_days`` marks whole days as off-peak (e.g. DeepSeek bills off-peak
+all day on Beijing weekends). The weekday is evaluated in the rule's own
+timezone — never the UTC date — so a provider whose weekend is bounded in a
+fixed-offset local time stays correct even when a peak window crosses the
+UTC date line.
 
 Built-in default (used when the key is absent): DeepSeek's published windows
-(01-04 and 06-10 UTC). User entries deep-merge over the default, so a partial
-``rate_windows`` map keeps the DeepSeek default for any matcher not listed.
+(01-04 and 06-10 UTC; off-peak all day on Beijing Saturdays/Sundays). User
+entries deep-merge over the default, so a partial ``rate_windows`` map keeps
+the DeepSeek default for any matcher not listed.
 
 Per-platform overrides live under ``display.platforms.<platform>.runtime_footer``.
 Users can toggle the global setting with ``/footer on|off`` from both the CLI
@@ -71,11 +84,16 @@ _SEP = " · "
 # Built-in time-of-use pricing windows. Keyed by model substring; peak hours
 # are half-open [start, end) in the entry's timezone. Source for the DeepSeek
 # default: https://api-docs.deepseek.com/quick_start/pricing (verified
-# 2026-08-20) — peak 01:00-04:00 and 06:00-10:00 UTC, off-peak is half price.
+# 2026-08-22) — peak 01:00-04:00 and 06:00-10:00 UTC, off-peak is half price,
+# and off-peak applies ALL DAY on Saturdays and Sundays Beijing time.
 _DEFAULT_RATE_WINDOWS: dict[str, dict[str, Any]] = {
     "deepseek": {
         "tz": "UTC",
         "peak": [(1, 4), (6, 10)],
+        "off_peak_days": {
+            "tz": "Asia/Shanghai",
+            "days": ["sat", "sun"],
+        },
     },
 }
 
@@ -102,7 +120,7 @@ def _model_short(model: Optional[str]) -> str:
 
 
 # DeepSeek peak/off-peak billing windows, in UTC (source: api-docs.deepseek.com
-# /quick_start/pricing, verified 2026-08-20). Peak hours are 01:00-04:00 and
+# /quick_start/pricing, verified 2026-08-22). Peak hours are 01:00-04:00 and
 # 06:00-10:00 UTC; all other hours are off-peak at half the price. SGT (UTC+8)
 # equivalents: 09:00-12:00 and 14:00-18:00. Kept for backward-compatible
 # helpers; the config-driven path is ``_DEFAULT_RATE_WINDOWS``.
@@ -135,17 +153,24 @@ def _match_rate_windows(
     model: Optional[str],
     rate_windows: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
-    """Return the first configured rate window whose key matches *model*.
+    """Return the rate window whose key matches *model*, longest key preferred.
 
     Keys are matched case-insensitively as substrings against the bare model
-    id (vendor prefix stripped). None when no window matches — the caller
-    then skips the ``rate_tier`` field silently.
+    id (vendor prefix stripped). When several keys match, the LONGEST one wins
+    — a specific matcher (``deepseek-v4-flash``) always beats a generic one
+    (``deepseek``) regardless of dict insertion order. None when no window
+    matches — the caller then skips the ``rate_tier`` field silently.
     """
     if not model:
         return None
     windows = rate_windows or _DEFAULT_RATE_WINDOWS
     bare = model.rsplit("/", 1)[-1].lower()
-    for key, win in windows.items():
+    # Sort by key length descending. Insertion order is NOT meaningful here:
+    # _merge_rate_windows seeds the built-in defaults first, so iterating in
+    # order would return the generic 'deepseek' window before a user's more
+    # specific entry was ever checked, silently inverting their config.
+    for key in sorted(windows, key=len, reverse=True):
+        win = windows[key]
         if key.lower() in bare:
             return win
     return None
@@ -159,6 +184,19 @@ def _hour_in_tz(now: _dt.datetime, tz_name: str) -> int:
         except Exception:
             pass
     return now.astimezone(_dt.timezone.utc).hour
+
+
+def _weekday_in_tz(now: _dt.datetime, tz_name: str) -> str:
+    """Lowercased 3-letter weekday of *now* in *tz_name* (``'sat'``).
+
+    Falls back to UTC on bad tz data, mirroring ``_hour_in_tz``.
+    """
+    if _ZoneInfo is not None:
+        try:
+            return now.astimezone(_ZoneInfo(tz_name)).strftime("%a").lower()
+        except Exception:
+            pass
+    return now.astimezone(_dt.timezone.utc).strftime("%a").lower()
 
 
 def rate_tier_for_model(
@@ -178,12 +216,31 @@ def rate_tier_for_model(
         return None
     now = now or _dt.datetime.now(_dt.timezone.utc)
     hour = _hour_in_tz(now, str(win.get("tz") or "UTC"))
+    # All-day off-peak day rule (e.g. DeepSeek bills off-peak all day on
+    # Beijing weekends). Weekend-ness is a property of the LOCAL date, so the
+    # weekday is evaluated in the rule's own timezone — never the UTC date,
+    # which disagrees with a fixed-offset local weekend for part of each day.
+    day_rule = win.get("off_peak_days")
+    if isinstance(day_rule, dict):
+        days = day_rule.get("days")
+        if isinstance(days, (list, tuple)) and days:
+            weekday = _weekday_in_tz(now, str(day_rule.get("tz") or "UTC"))
+            if weekday in {str(d).strip().lower()[:3] for d in days}:
+                return "off-peak"
     for start, end in win.get("peak") or ():
         try:
             start_i, end_i = int(start), int(end)
         except (TypeError, ValueError):
             continue
-        if start_i <= hour < end_i:
+        # Half-open [start, end); a window whose end <= start wraps midnight
+        # ([[22, 2]] → 22:00-01:59 peak). Without the wrap branch such a
+        # window parses fine but silently matches nothing.
+        in_window = (
+            start_i <= hour < end_i
+            if start_i <= end_i
+            else (hour >= start_i or hour < end_i)
+        )
+        if in_window:
             return "peak"
     return "off-peak"
 
