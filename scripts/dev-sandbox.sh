@@ -480,10 +480,23 @@ INTERACTIVE=false
 if [ -t 0 ] && [ -t 1 ]; then
   INTERACTIVE=true
 fi
+# DEV_SANDBOX_NODE_DIR feeds node-gyp's npm_config_nodedir (see stage2-run.sh),
+# which must point at a real Node headers tree (an <nodedir>/common.gypi plus
+# include/node/*.h) matching the sandboxed Node's own version -- not just any
+# `node` on PATH. There used to be a fallback here that derived it from
+# `dirname(dirname(command -v node))`, but that is two levels up from
+# wherever the binary happens to live (a plain bin/ install, an nvm shim, GH
+# Actions' hostedtoolcache, ...) and is never actually a headers directory --
+# it has no common.gypi, so node-gyp's `gyp` step fails immediately with
+# "<dir>/common.gypi not found" before it ever gets to compile anything. That
+# is exactly how node-pty's Linux build (which ships no Linux prebuilds --
+# see node-pty's own scripts/prebuild.js) broke in CI (#install-e2e cycle 2):
+# it forced node-gyp at a nonsense nodedir instead of letting it fall back to
+# its default behavior of downloading the correct headers for the Node
+# actually running, which the sandbox's proxy forwards like any other
+# registry fetch. So: leave this empty unless a caller explicitly sets
+# DEV_SANDBOX_NODE_DIR to a real headers tree.
 NODE_DIR="${DEV_SANDBOX_NODE_DIR:-}"
-if [ -z "$NODE_DIR" ] && command -v node >/dev/null; then
-  NODE_DIR="$(dirname "$(dirname "$(command -v node)")")"
-fi
 WAYLAND_SOCKET=""
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] \
   && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
