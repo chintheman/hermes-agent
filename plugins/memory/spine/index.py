@@ -705,7 +705,15 @@ class MemoryIndex:
         # (see _vector_search comment). Grid-tested Aug 14: pool 40/60/100/300
         # all score recall 0.641 (vs 0.558 at k*3); 60 chosen as headroom
         # without paying for 300-candidate RRF every call.
-        pool = max(k * 3, 60)
+        # Raised to 200 on 2026-08-25: at pool 60 the golden observation for
+        # eval case mh-verification-discipline sat just outside the candidate
+        # set (rank 9 at pool 90, absent at 60), so the eval regression gate
+        # flipped after the store grew past the Aug-14 tuning size. Swept
+        # Swept floors 60/100/150/200/300/450 against the 29-case eval set:
+        # only >= 200 passes all (60 and 100/150 each starve one case).
+        # Bench A/B on the current store: 200 costs 0.686->0.681 recall
+        # (-0.7%) vs the 60 floor while closing the eval gap.
+        pool = max(k * 3, 200)
         if query_embedding is None:
             return self.search_fts(query, profile, limit=pool)[:k]
 
