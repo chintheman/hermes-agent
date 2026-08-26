@@ -41,6 +41,12 @@ def _run_node_deps_stage(
         encoding="utf-8",
     )
     _write_executable(bin_dir / "node", "#!/bin/sh\necho v26.0.0\n")
+    # Honour --silent the way real npm does: it sets loglevel=silent, which
+    # suppresses npm's OWN error output as well as its progress. The installer
+    # captures npm's output specifically to replay it on failure (#87340), so a
+    # stub that always talks would let a --silent call site pass this suite
+    # while shipping users a bare "npm install failed" with nothing under it --
+    # which is exactly how the sandbox TLS failure reached CI undiagnosable.
     _write_executable(
         bin_dir / "npm",
         """#!/bin/sh
@@ -48,9 +54,17 @@ if [ "${1:-}" = "--version" ]; then
     echo 12.0.0
     exit 0
 fi
+quiet=false
+for arg in "$@"; do
+    case "$arg" in
+        --silent|--loglevel=silent|-s) quiet=true ;;
+    esac
+done
 printf '%s\\n' "$PWD" >> "$NPM_CALLS"
 if [ -n "${NPM_FAIL_DIRECTORY:-}" ] && [ "$PWD" = "$NPM_FAIL_DIRECTORY" ]; then
-    echo "simulated npm lifecycle failure" >&2
+    if [ "$quiet" = false ]; then
+        echo "simulated npm lifecycle failure" >&2
+    fi
     exit 37
 fi
 exit 0
@@ -111,6 +125,8 @@ def test_root_node_dependency_failure_is_fatal(tmp_path: Path) -> None:
     assert "Node.js dependencies installed" not in proc.stdout
     assert "TUI dependencies installed" not in proc.stdout
     assert not (install_dir / "node_modules").exists()
+    # npm's own diagnosis has to reach the user, not just "npm install failed".
+    assert "simulated npm lifecycle failure" in proc.stderr
 
 
 def test_tui_node_dependency_failure_is_fatal(tmp_path: Path) -> None:
@@ -126,6 +142,7 @@ def test_tui_node_dependency_failure_is_fatal(tmp_path: Path) -> None:
     assert calls == [str(install_dir), str(tui_dir)]
     assert "Node.js dependencies installed" in proc.stdout
     assert "TUI dependencies installed" not in proc.stdout
+    assert "simulated npm lifecycle failure" in proc.stderr
 
 
 def test_node_dependency_success_remains_successful(tmp_path: Path) -> None:
