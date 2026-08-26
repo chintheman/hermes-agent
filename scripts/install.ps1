@@ -573,7 +573,7 @@ function Write-NpmDebugLogTail {
         $candidate = $Matches['path'].Trim()
         if (Test-Path -LiteralPath $candidate) { $logPath = $candidate }
     }
-    # Fallback (covers --silent runs, truncated output): newest debug log in
+    # Fallback (covers truncated or suppressed output): newest debug log in
     # npm's cache _logs directory.
     if (-not $logPath) {
         try {
@@ -676,7 +676,11 @@ function Install-AgentBrowser {
     $npmLog = [System.IO.Path]::GetTempFileName()
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    & $npm install -g --prefix $prefixDir --silent --ignore-scripts "@askjo/camofox-browser@^1.5.2" 2>&1 | Tee-Object -FilePath $npmLog | Out-Null
+    # --loglevel=error, not --silent: $npmLog exists purely for the failure
+    # branch below, and --silent suppresses npm's own error output too, so the
+    # capture came back blank exactly when it mattered. Same fix as the three
+    # npm call sites in install.sh.
+    & $npm install -g --prefix $prefixDir --loglevel=error --ignore-scripts "@askjo/camofox-browser@^1.5.2" 2>&1 | Tee-Object -FilePath $npmLog | Out-Null
     $npmExit = $LASTEXITCODE
     $ErrorActionPreference = $prevEAP
     if ($npmExit -ne 0) {
@@ -684,8 +688,9 @@ function Install-AgentBrowser {
         Remove-Item $npmLog -Force -ErrorAction SilentlyContinue
         Write-Err "npm install -g failed (exit $npmExit): $npmDetail"
         Show-NpmCertHint $npmDetail | Out-Null
-        # This install runs with --silent, so $npmDetail is often near-empty;
-        # npm's debug log is the only place the real error survives.
+        # Belt-and-braces even now that npm reports errors: some failures
+        # (EBUSY retry chains, gyp stack traces) only ever land in npm's own
+        # debug log, never on stderr.
         Write-NpmDebugLogTail -NpmOutput $npmDetail
         throw "npm install failed"
     }
@@ -3348,7 +3353,9 @@ function Install-NodeDeps {
             # via the returned exit code, which is reliable regardless of
             # stderr noise.
             $ErrorActionPreference = "Continue"
-            $code = _Invoke-NativeWithTimeout $npmPath "install --silent" `
+            # --loglevel=error, not --silent: $logPath is read back and echoed
+            # under "npm output:" below, and --silent leaves it empty.
+            $code = _Invoke-NativeWithTimeout $npmPath "install --loglevel=error" `
                 $installDir $logPath $nodeDepsTimeoutSec
             $ErrorActionPreference = $prevEAP
             if ($code -eq 0) {
