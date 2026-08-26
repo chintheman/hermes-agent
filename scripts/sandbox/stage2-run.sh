@@ -196,6 +196,16 @@ if [ "$DEV_SANDBOX_INTERACTIVE" = true ]; then
   dev_mounts=(--dev /dev)
 fi
 
+# CURL_CA_BUNDLE / SSL_CERT_FILE / GIT_SSL_CAINFO / NODE_EXTRA_CA_CERTS below
+# must all trust ca.pem, the sandbox's own throwaway CA -- proxy.py terminates
+# every HTTPS connection (fixture or forwarded) with a cert it mints from that
+# CA (handle_connect -> cert_for), so that is the only cert any client inside
+# the sandbox ever actually sees. real-ca.pem (the host's system bundle) is
+# used server-side, by the proxy itself, to verify the far end when it
+# forwards a request upstream -- no in-sandbox client needs it. Node does not
+# read CURL_CA_BUNDLE/SSL_CERT_FILE; it only trusts its bundled Mozilla roots
+# plus NODE_EXTRA_CA_CERTS, so pointing that one at real-ca.pem (as before)
+# made every npm TLS handshake fail certificate verification.
 exec bwrap \
   --unshare-pid \
   --die-with-parent --proc /proc --tmpfs /tmp \
@@ -216,7 +226,7 @@ exec bwrap \
   --setenv CURL_CA_BUNDLE /work/certs/ca.pem \
   --setenv SSL_CERT_FILE /work/certs/ca.pem \
   --setenv GIT_SSL_CAINFO /work/certs/ca.pem \
-  --setenv NODE_EXTRA_CA_CERTS /work/certs/real-ca.pem \
+  --setenv NODE_EXTRA_CA_CERTS /work/certs/ca.pem \
   --setenv OPENSSL_CONF /work/certs/openssl.cnf \
   --setenv HTTP_PROXY http://127.0.0.1:8080 \
   --setenv HTTPS_PROXY http://127.0.0.1:8080 \
