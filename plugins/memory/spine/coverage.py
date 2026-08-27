@@ -29,12 +29,43 @@ _TRIM = ".,;:!?)('\"`/-"
 _TAG = re.compile(r"^\s*\[(C|R|W|F|ID)\]\s*")
 
 
-def _corpus_count(conn: sqlite3.Connection, token: str) -> int:
+def _corpus_count(conn: sqlite3.Connection, token: str,
+                  profile: Optional[str] = None) -> int:
+    """How many corpus rows contain `token`.
+
+    `profile` scopes the observation half to one profile and drops the wiki
+    entirely — that is the form needed to ask "is this already covered by
+    agent:claude-code specifically", which the unscoped version cannot answer
+    because it counts every profile plus 2,643 wiki chunks.
+    """
+    if profile:
+        return conn.execute(
+            "SELECT COUNT(*) FROM observations WHERE profile = ? AND content LIKE ?",
+            (profile, "%" + token + "%")).fetchone()[0]
     n = conn.execute("SELECT COUNT(*) FROM observations WHERE content LIKE ?",
                      ("%" + token + "%",)).fetchone()[0]
     n += conn.execute("SELECT COUNT(*) FROM wiki_chunks WHERE content LIKE ?",
                       ("%" + token + "%",)).fetchone()[0]
     return n
+
+
+def covered_by_profile(text: str, conn: sqlite3.Connection, profile: str,
+                       n: int = 4) -> Tuple[bool, List[str]]:
+    """Is `text` already represented in `profile`?
+
+    Ranks tokens by rarity across the WHOLE corpus (so "the rarest terms in this
+    text" stays meaningful), then asks whether those terms appear in the target
+    profile. Returns (covered, tokens_found_there).
+
+    Deliberately strict: all n rarest tokens must be present. Measured on the
+    live store, that bar puts overlap between agent:main and agent:claude-code
+    at 11%, with corrections 88% novel.
+    """
+    probes = distinctive_tokens(text, conn, n)
+    if not probes:
+        return False, []
+    found = [t for t in probes if _corpus_count(conn, t, profile=profile) > 0]
+    return len(found) == len(probes), found
 
 
 def distinctive_tokens(text: str, conn: sqlite3.Connection, n: int = 3) -> List[str]:

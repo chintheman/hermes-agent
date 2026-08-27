@@ -327,3 +327,90 @@ def test_foreign_records_are_never_deleted():
     os.remove(os.path.join(sync.MEM_DIR, "alpha.md"))
     recs3, skipped3 = sync.build_records("2026-01-03T00:00:00+00:00")
     assert sync.classify_gone(prior, recs3, skipped3)["deleted"] == {recs[0]["id"]}
+
+
+# ── the Hermes -> Claude Code write path ──────────────────────────────
+
+def _proposals_env(tmp, proposals, memories, evidence_by_id):
+    """Point heartbeat's proposals check at throwaway dirs and a throwaway DB."""
+    import heartbeat
+
+    pdir = os.path.join(tmp, "proposals")
+    mdir = os.path.join(tmp, "memories")
+    os.makedirs(pdir)
+    os.makedirs(mdir)
+    for name in proposals:
+        with open(os.path.join(pdir, name), "w", encoding="utf-8") as fh:
+            fh.write("---\nname: x\n---\n")
+    for name, obs_id in memories:
+        with open(os.path.join(mdir, name), "w", encoding="utf-8") as fh:
+            fh.write(f"---\nname: x\nmetadata:\n  source_obs_id: {obs_id}\n---\nbody\n")
+
+    db = os.path.join(tmp, "t.db")
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE observations (id TEXT PRIMARY KEY, evidence TEXT)")
+    for obs_id, ev in evidence_by_id.items():
+        con.execute("INSERT INTO observations VALUES (?, ?)", (obs_id, ev))
+    con.commit()
+    con.close()
+
+    heartbeat.PROPOSAL_DIR = pdir
+    heartbeat.CLAUDE_MEM_DIR = mdir
+    return heartbeat, type("Cfg", (), {"db": db})()
+
+
+def test_proposals_check_is_silent_when_the_queue_is_clear():
+    """The healthy state. If this ever fails the check is pure noise."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hb, cfg = _proposals_env(
+            tmp, [], [("a.md", "OBS1")],
+            {"OBS1": json.dumps(["exported to claude-code memory: a.md"])})
+        status, msg = hb.check_proposals(cfg)
+        assert status == hb.OK, msg
+
+
+def test_proposals_check_fires_on_a_pending_queue():
+    """NEGATIVE CONTROL for the pending half. A check that cannot fail is not
+    a check -- the whole reason this exists is that an unreviewed queue looks
+    exactly like a healthy one from the outside."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hb, cfg = _proposals_env(tmp, ["p1.md", "p2.md"], [], {})
+        status, msg = hb.check_proposals(cfg)
+        assert status == hb.FAIL, msg
+        assert "2 proposal" in msg
+
+
+def test_proposals_check_fires_on_a_promoted_but_unmarked_row():
+    """NEGATIVE CONTROL for the duplicate half.
+
+    A promoted memory whose spine row was never stamped exported gets proposed
+    again forever, and the 4h sync returns the promoted file as a second
+    observation while the original still stands. Nothing errors, so nothing
+    surfaces it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        hb, cfg = _proposals_env(
+            tmp, [], [("promoted.md", "OBS2")],
+            {"OBS2": json.dumps(["hot core import"])})   # no export stamp
+        status, msg = hb.check_proposals(cfg)
+        assert status == hb.FAIL, msg
+        assert "promoted.md" in msg
+
+
+def test_proposals_check_ignores_a_memory_whose_source_row_is_gone():
+    """A row deleted or moved to another profile is not this check's problem.
+    Failing on it would make the check permanently red for reasons the operator
+    cannot act on, which is how guards stop being read."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hb, cfg = _proposals_env(tmp, [], [("orphan.md", "MISSING")], {})
+        status, msg = hb.check_proposals(cfg)
+        assert status == hb.OK, msg
+
+
+def test_proposals_check_skips_when_there_is_no_queue():
+    """Missing evidence is a SKIP, never a FAIL. Silent when blind."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hb, cfg = _proposals_env(tmp, [], [], {})
+        hb.PROPOSAL_DIR = os.path.join(tmp, "does-not-exist")
+        status, _ = hb.check_proposals(cfg)
+        assert status == hb.SKIP
