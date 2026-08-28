@@ -4043,6 +4043,24 @@ class TelegramAdapter(BasePlatformAdapter):
         handler: Optional[Callable[[Dict[str, Any], Any], Awaitable[None]]] = getattr(
             self, "_platform_event_handler", None
         )
+        # FB-01 (topic drift): persist forum_topic_created service messages the
+        # moment a topic is created, BEFORE anyone posts in it. Telegram emits
+        # this event to the bot for every new forum topic in a group where the
+        # bot is a member — including topics a human creates in the UI. The
+        # channel_directory is session-derived (only topics with message
+        # activity appear), so without this a UI-created topic is invisible to
+        # the drift nudge until someone messages it. Writes to a dedicated
+        # state file (survives channel_directory rebuilds) that the nudge
+        # reads. getForumTopics is NOT a Bot API method (verified 2026-08-20),
+        # so this event is the only near-total enumeration source. Additive:
+        # no routing or auth change; a malformed event degrades to a debug log.
+        try:
+            msg = getattr(update, "message", None)
+            ftc = getattr(msg, "forum_topic_created", None) if msg is not None else None
+            if ftc is not None:
+                self._persist_forum_topic_created(msg, ftc)
+        except Exception:
+            logger.debug("[%s] forum_topic_created persist error", self.name, exc_info=True)
         if handler is None:
             return
         try:
@@ -10315,6 +10333,47 @@ class TelegramAdapter(BasePlatformAdapter):
                 "[%s] Cached DM topic from message: %s -> thread_id=%s",
                 self.name, cache_key, thread_id,
             )
+
+    def _persist_forum_topic_created(self, message, ftc) -> None:
+        """Persist a forum_topic_created service message for the drift nudge.
+
+        Writes {thread_id: {name, created_at}} to
+        ~/.hermes/state/telegram-forum-topics.json (one file per chat). The
+        topic-drift nudge merges this with the session-derived
+        channel_directory so a UI-created topic is known the moment it exists,
+        not only after the first message. Append-and-merge, never clobber:
+        the state file may hold topics the gateway saw before a restart.
+        """
+        try:
+            chat = getattr(message, "chat", None)
+            chat_id = str(getattr(chat, "id", ""))
+            thread_id = getattr(message, "message_thread_id", None)
+            name = getattr(ftc, "name", "") or ""
+            if not chat_id or thread_id is None or not name:
+                return
+            import os
+            path = os.path.expanduser("~/.hermes/state/telegram-forum-topics.json")
+            state = {}
+            if os.path.exists(path):
+                try:
+                    with open(path) as f:
+                        state = json.load(f)
+                except Exception:
+                    state = {}
+            per_chat = state.setdefault(chat_id, {})
+            per_chat[str(thread_id)] = {
+                "name": name,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(state, f, indent=2)
+            logger.info(
+                "[%s] Persisted forum topic created: %s (thread %s in %s)",
+                self.name, name, thread_id, chat_id,
+            )
+        except Exception as e:
+            logger.debug("[%s] forum_topic_created persist failed: %s", self.name, e)
 
     @classmethod
     def _flatten_rich_inline_text(cls, value: Any) -> str:
