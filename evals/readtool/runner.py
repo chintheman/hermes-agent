@@ -83,8 +83,11 @@ def run_task(task, model: str, provider: str, timeout_mult: float,
     os.environ["TERMINAL_CWD"] = str(ws)
     # Keep only the API key the run needs; hide the rest so provider
     # auto-detection can't wander (mirrors run_tests.sh hermeticity).
+    # Direct-provider runs (deepseek/anthropic) need their keys too, so
+    # preserve those alongside the OpenRouter default.
+    _PRESERVE = {"OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"}
     for var in list(os.environ):
-        if var.endswith("_API_KEY") and var != "OPENROUTER_API_KEY":
+        if var.endswith("_API_KEY") and var not in _PRESERVE:
             os.environ.pop(var)
     result: dict = {"task_id": task.task_id, "capability": task.capability}
     t0 = time.monotonic()
