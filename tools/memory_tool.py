@@ -26,6 +26,7 @@ Design:
 import copy
 import json
 import logging
+import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -46,6 +47,97 @@ except ImportError:
         import msvcrt
     except ImportError:
         pass
+
+# Near-duplicate detection for memory() adds. The hot-core bloat incident
+# (Aug 26 2026) was five Garmin-sync entries that were semantically identical
+# but written in genuinely different words — difflib character-ratio scored
+# them 0.06-0.31 (indistinguishable from unrelated entries), so a text-level
+# similarity check cannot catch this class. Token overlap over DISTINCTIVE
+# tokens (IDF-filtered) does: the real dup cluster scored 0.30-1.0 overlap
+# with 4+ shared rare tokens, while every legitimately-distinct pair in the
+# live MEMORY.md scored below the corner (verified by a full grid sweep on
+# 2026-08-26 data: doc-fraction 0.08, overlap 0.32, min-shared 4 catches all
+# 10 dup pairs and zero of the 57 live entries' 1,596 pairs). The IDF filter
+# is the load-bearing part: the Garmin dups share RARE tokens (garmin,
+# readiness, synced, null), while near-miss distinct pairs share only common
+# glue tokens (system, topic, fix, claude) that appear across many entries
+# and get filtered out. Scoped to the "memory" target only: USER.md facts
+# legitimately share identifiers (the same account email across distinct
+# Google/Apple facts) and must keep exact-match semantics.
+_NEAR_DUP_MAX_DOC_FRACTION = 0.08
+_NEAR_DUP_MIN_OVERLAP = 0.32
+_NEAR_DUP_MIN_SHARED_TOKENS = 4
+
+# Tokens that carry no discriminating signal for the overlap test. Kept local
+# (not imported from spine) because tools/ is core and must not depend on a
+# plugin. Matches the probe stoplist used for calibration.
+_NEAR_DUP_STOPWORDS = frozenset(
+    """the a an and or but for with without to of in on at by from as is are was were be been
+    it its this that these those there here user chin hermes she he they we you your my our i not no yes
+    can could will would should must may might do does did has have had about into over under between
+    after before during since until while when where which who whom what how why all any both each few
+    more most other some such only own same so than too very just also now then there their via per""".split()
+)
+
+_NEAR_DUP_TOKEN_RE = re.compile(r"[^a-z0-9\s]")
+
+
+def _near_dup_tokens(text: str) -> set:
+    """Lowercase, strip punctuation, drop stopwords and 1-2 char tokens."""
+    lowered = _NEAR_DUP_TOKEN_RE.sub(" ", text.lower())
+    return {t for t in lowered.split() if t not in _NEAR_DUP_STOPWORDS and len(t) > 2}
+
+
+def _distinctive_tokens(text: str, corpus_freq, corpus_size: int) -> set:
+    """Tokens of `text` that are rare across the corpus (present in <= 8% of entries).
+
+    `corpus_size` is the number of ENTRIES, not the number of distinct tokens --
+    corpus_freq maps token -> document frequency, so the cap must be a fraction
+    of the document count for the IDF filter to bite at all.
+    """
+    toks = _near_dup_tokens(text)
+    if not toks:
+        return set()
+    cap = max(corpus_size * _NEAR_DUP_MAX_DOC_FRACTION, 1)
+    return {t for t in toks if corpus_freq.get(t, 0) <= cap}
+
+
+def _near_duplicate_of(content: str, entries: List[str]) -> Optional[str]:
+    """Return the existing entry that `content` semantically duplicates, if any.
+
+    Overlap coefficient over IDF-filtered (distinctive) tokens with a floor
+    on shared-token count. Corpus frequency is derived from `entries`
+    (the current hot core), so the filter adapts as the store evolves.
+    Both thresholds are required — the coefficient alone false-positives on
+    entries sharing common glue tokens, and the shared-token floor alone
+    misses short-but-distinct entries. See module comment for calibration.
+    """
+    new_tokens = _near_dup_tokens(content)
+    if not new_tokens:
+        return None
+    from collections import Counter
+
+    corpus_freq = Counter()
+    for e in entries:
+        for t in _near_dup_tokens(e):
+            corpus_freq[t] += 1
+    corpus_size = len(entries)
+    new_distinctive = _distinctive_tokens(content, corpus_freq, corpus_size)
+    if not new_distinctive:
+        return None
+    for existing in entries:
+        if existing == content:
+            continue  # exact match is handled separately
+        existing_distinctive = _distinctive_tokens(existing, corpus_freq, corpus_size)
+        if not existing_distinctive:
+            continue
+        shared = new_distinctive & existing_distinctive
+        if len(shared) < _NEAR_DUP_MIN_SHARED_TOKENS:
+            continue
+        overlap = len(shared) / min(len(new_distinctive), len(existing_distinctive))
+        if overlap >= _NEAR_DUP_MIN_OVERLAP:
+            return existing
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -445,6 +537,23 @@ class MemoryStore:
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
 
+            # Reject semantic near-duplicates — same lesson, reworded. The
+            # exact check above misses this class (Garmin sync-gap incident,
+            # Aug 26 2026: five entries saying the same thing, each written
+            # differently). Memory-target only: USER.md facts legitimately
+            # share identifiers (same account email across distinct facts).
+            # Return the matched entry so the model can replace it if the new
+            # wording is richer, instead of silently stacking another copy
+            # into the hot core.
+            if target == "memory":
+                near = _near_duplicate_of(content, entries)
+                if near is not None:
+                    return self._success_response(
+                        target,
+                        "Entry is a near-duplicate of an existing entry (no duplicate "
+                        f"added): {near[:120]!r}. Use 'replace' if you meant to update it.",
+                    )
+
             # Calculate what the new total would be
             new_entries = entries + [content]
             new_total = len(ENTRY_DELIMITER.join(new_entries))
@@ -632,6 +741,12 @@ class MemoryStore:
                         return self._batch_error(target, f"{pos}: content is required.")
                     if content in working:
                         continue  # idempotent -- skip duplicate, don't fail the batch
+                    if target == "memory" and _near_duplicate_of(content, working) is not None:
+                        # Same lesson reworded — skip like an exact duplicate.
+                        # Mirrors the single-op add() behavior (Garmin sync-gap
+                        # incident, Aug 26 2026): stacking near-dups into the
+                        # hot core is the failure mode the exact check misses.
+                        continue
                     working.append(content)
 
                 elif act == "replace":
