@@ -39,7 +39,8 @@ def main() -> None:
     db_path = os.path.abspath(os.path.expanduser(args.db))
     # macOS/WAL quirk: `mode=ro` URI can fail at first query. Open normally
     # and enforce read-only at the engine level — this script only SELECTs.
-    conn = sqlite3.connect(db_path)
+    from spine.index import connect_db
+    conn = connect_db(db_path)
     conn.execute("PRAGMA query_only = ON")
 
     # Load full text of both tiers (content only — small enough)

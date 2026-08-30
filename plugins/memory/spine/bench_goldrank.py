@@ -192,7 +192,8 @@ def main() -> None:
     fd, snap = tempfile.mkstemp(prefix="spine-goldrank-", suffix=".db")
     os.close(fd)
     os.unlink(snap)
-    src = sqlite3.connect(args.db)
+    from spine.index import connect_db
+    src = connect_db(args.db)
     dst = sqlite3.connect(snap)
     try:
         src.backup(dst)

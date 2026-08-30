@@ -223,6 +223,27 @@ DEFAULT_K = 20
 SEARCHABLE_STATUSES = ("active", "promoted", "demoted")
 _STATUS_PLACEHOLDERS = ",".join("?" * len(SEARCHABLE_STATUSES))
 
+# How long a connection waits on a busy lock before raising "database is
+# locked". sqlite3.connect() defaults to 5s, which is shorter than a nightly
+# consolidation pass or a wiki reindex holding the WAL write lock. The live
+# memory.db is shared by every cron consumer plus active sessions, and on
+# 2026-08-30 16:01 the 4-hourly Claude Code sync crashed at its very first
+# write (the dim_meta stamp in _create_schema) because another writer held
+# the lock for >5s. 30s covers every writer this store has; a genuine hang
+# still surfaces as an error rather than blocking forever.
+DB_BUSY_TIMEOUT_S = 30.0
+
+
+def connect_db(db_path: str, **kwargs: Any) -> sqlite3.Connection:
+    """sqlite3.connect() with the spine-wide busy timeout applied.
+
+    Every spine script that opens memory.db directly (heartbeat, hotcore sync,
+    benchmark snapshot, propose_memories) should go through this so the
+    timeout is set in one place. Extra kwargs (uri=True, ...) pass through.
+    """
+    kwargs.setdefault("timeout", DB_BUSY_TIMEOUT_S)
+    return sqlite3.connect(db_path, **kwargs)
+
 
 def _vector_to_blob(vector: List[float]) -> bytes:
     """Pack a float list into a binary blob (little-endian float32)."""
@@ -328,7 +349,7 @@ class MemoryIndex:
     def open(self) -> None:
         """Open the database, create schema if needed."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
+        self._conn = connect_db(str(self._db_path))
         self._conn.execute("PRAGMA journal_mode=WAL")
         # INSERT OR REPLACE resolves a conflict by deleting the old row, but that
         # delete does NOT fire AFTER DELETE triggers unless recursive_triggers is
@@ -448,10 +469,22 @@ class MemoryIndex:
         # over the stored one, so a model swap without a re-embed could never
         # be detected -- and check_embedder compared the live embedder against
         # a value the live embedder had just written.
-        self.conn.execute(
-            "INSERT OR IGNORE INTO dim_meta (key, value) VALUES (?, ?)",
-            ("embedding_dim", str(embedding_dim())),
-        )
+        #
+        # Read before write: INSERT OR IGNORE still takes the WAL write lock
+        # even when the row exists and nothing changes, so every open() --
+        # including read-only consumers like recall -- contended with whichever
+        # writer was active. Only reach for the lock when the row is missing.
+        if self.conn.execute(
+            "SELECT 1 FROM dim_meta WHERE key='embedding_dim'"
+        ).fetchone() is None:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO dim_meta (key, value) VALUES (?, ?)",
+                ("embedding_dim", str(embedding_dim())),
+            )
+            # Python's sqlite3 opens an implicit transaction on that INSERT
+            # and leaves it open; until the caller commits or closes, this
+            # connection holds the WAL write lock against every sibling.
+            self.conn.commit()
 
         self._migrate_fts_tokenizer()
 

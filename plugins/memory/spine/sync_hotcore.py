@@ -21,6 +21,8 @@ import argparse
 import json
 import os
 import sqlite3
+
+from spine.index import connect_db
 import sys
 
 PROFILE = "agent:main"
@@ -43,7 +45,7 @@ def main() -> None:
 
     config = load_spine_config()
     mem_path = os.path.expanduser("~/.hermes/memories/MEMORY.md")
-    con = sqlite3.connect(os.path.expanduser(config.db))
+    con = connect_db(os.path.expanduser(config.db))
     con.execute("PRAGMA query_only = ON")
     try:
         uncovered = coverage.uncovered_hotcore(mem_path, con)
@@ -109,7 +111,7 @@ def main() -> None:
         idx.close()
 
     # Verify rather than assume: re-run the same coverage test.
-    con = sqlite3.connect(os.path.expanduser(config.db))
+    con = connect_db(os.path.expanduser(config.db))
     con.execute("PRAGMA query_only = ON")
     try:
         still = coverage.uncovered_hotcore(mem_path, con)

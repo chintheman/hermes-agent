@@ -36,6 +36,8 @@ import json
 import re
 import os
 import sqlite3
+
+from spine.index import connect_db
 import sys
 import time
 
@@ -61,7 +63,7 @@ def check_embedder(cfg):
     if not embedder.embedder_available():
         return FAIL, "embedder unavailable — recall has silently dropped to keyword-only"
     dim = embedder.get_embedding_dim()
-    con = sqlite3.connect(cfg.db)
+    con = connect_db(cfg.db)
     con.execute("PRAGMA query_only = ON")
     row = con.execute("SELECT value FROM dim_meta WHERE key='embedding_dim'").fetchone()
     con.close()
@@ -90,7 +92,7 @@ def check_vector_width(cfg):
     want = embedder.get_embedding_dim()
     if not want:
         return SKIP, "embedder reports no dimension"
-    con = sqlite3.connect(cfg.db)
+    con = connect_db(cfg.db)
     con.execute("PRAGMA query_only = ON")
     try:
         widths = set()
@@ -111,7 +113,7 @@ def check_vector_width(cfg):
 
 
 def check_vectors(cfg):
-    con = sqlite3.connect(cfg.db)
+    con = connect_db(cfg.db)
     con.execute("PRAGMA query_only = ON")
     total = con.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
     novec = con.execute(
@@ -173,7 +175,7 @@ def check_sync(cfg):
     n_files = len(recs)
 
     age_h = (time.time() - os.path.getmtime(jsonl)) / 3600
-    con = sqlite3.connect(cfg.db)
+    con = connect_db(cfg.db)
     con.execute("PRAGMA query_only = ON")
     try:
         n_rows = con.execute("SELECT COUNT(*) FROM observations WHERE profile=?",
@@ -233,7 +235,7 @@ def check_divergence(cfg):
     if not on_disk:
         return SKIP, "canonical store is empty"
 
-    con = sqlite3.connect(cfg.db)
+    con = connect_db(cfg.db)
     con.execute("PRAGMA query_only = ON")
     try:
         diff = [i for i, s in con.execute("SELECT id, status FROM observations")
@@ -330,7 +332,7 @@ def check_hotcore_coverage(cfg):
     from spine import coverage
     if not os.path.exists(MEM_MD):
         return SKIP, "MEMORY.md not found"
-    con = sqlite3.connect(cfg.db)
+    con = connect_db(cfg.db)
     con.execute("PRAGMA query_only = ON")
     try:
         total = len(coverage.hotcore_blocks(MEM_MD))
@@ -444,7 +446,7 @@ def check_fts_index(cfg):
     majority-ghost corpus. The docsize shadow table is the one count that
     reflects the index itself.
     """
-    con = sqlite3.connect(cfg.db)
+    con = connect_db(cfg.db)
     con.execute("PRAGMA query_only = ON")
     try:
         problems = []

@@ -63,7 +63,8 @@ CANDIDATE_TYPES = ("correction", "preference", "pattern", "identity")
 
 
 def connect(db: str) -> sqlite3.Connection:
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5.0)
+    from spine.index import connect_db
+    con = connect_db(f"file:{db}?mode=ro", uri=True)
     con.execute("PRAGMA query_only = ON")
     return con
 
@@ -109,7 +110,8 @@ def mark_exported(db: str, obs_id: str, filename: str) -> None:
     cfg = load_spine_config()
     stamp = f"{EXPORT_PREFIX}{filename}"
 
-    con = sqlite3.connect(db)
+    from spine.index import connect_db
+    con = connect_db(db)
     try:
         row = con.execute("SELECT evidence, profile FROM observations WHERE id=?",
                           (obs_id,)).fetchone()
