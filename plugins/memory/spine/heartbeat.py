@@ -407,7 +407,7 @@ def check_proposals(cfg):
             promoted[m.group(1)] = os.path.basename(path)
 
     if promoted:
-        con = sqlite3.connect(f"file:{cfg.db}?immutable=1", uri=True)
+        con = connect_db(f"file:{cfg.db}?immutable=1", uri=True)
         try:
             qs = ",".join("?" * len(promoted))
             rows = dict(con.execute(
