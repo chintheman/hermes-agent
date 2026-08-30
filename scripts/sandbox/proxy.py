@@ -24,6 +24,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 from urllib.parse import unquote, urlsplit
 
 ROOT, CERTS, REAL_CA = map(pathlib.Path, sys.argv[1:])
@@ -31,6 +32,8 @@ ROOT, CERTS, REAL_CA = map(pathlib.Path, sys.argv[1:])
 LISTEN_ADDRESS = ('127.0.0.1', 8080)
 MAX_REQUEST_BYTES = 65536
 UPSTREAM_TIMEOUT_SECONDS = 30
+UPSTREAM_CONNECT_ATTEMPTS = 3
+UPSTREAM_RETRY_DELAY_SECONDS = 0.5
 CERT_VALIDITY_DAYS = 2
 
 
@@ -150,12 +153,60 @@ def relay(source, destination):
         destination.sendall(chunk)
 
 
+# Failures that mean "the connection never got established", not "the host
+# rejected us": a refused/reset TCP connect, a connect timeout, or a TLS
+# handshake the peer cut short. The last one surfaces as SSLEOFError
+# (``UNEXPECTED_EOF_WHILE_READING``) and is what a CDN edge dropping the socket
+# looks like from here; the install E2E saw it in bursts from nodejs.org.
+# Certificate failures are deliberately NOT in this set: they are deterministic
+# and retrying would only hide them.
+TRANSIENT_CONNECT_ERRORS = (
+    ssl.SSLEOFError, ssl.SSLZeroReturnError, ConnectionError, TimeoutError,
+)
+
+
+def open_upstream(host, port, tls):
+    """Connect to the real host, retrying failures that happen before any
+    bytes are exchanged.
+
+    Nothing has been sent upstream or relayed to the client at this point,
+    so a second attempt is safe; once the request is on the wire the proxy
+    streams the response and cannot retry (the client has already seen part
+    of it). The retry is bounded and logged per attempt so proxy.log shows
+    which host flaked and whether the retry rescued it.
+    """
+    last_error = None
+    for attempt in range(1, UPSTREAM_CONNECT_ATTEMPTS + 1):
+        raw = None
+        try:
+            raw = socket.create_connection(
+                (host, port), timeout=UPSTREAM_TIMEOUT_SECONDS
+            )
+            if not tls:
+                return raw
+            context = ssl.create_default_context(cafile=str(REAL_CA))
+            return context.wrap_socket(raw, server_hostname=host)
+        except TRANSIENT_CONNECT_ERRORS as error:
+            if raw is not None:
+                raw.close()
+            last_error = error
+            print(
+                f'upstream connect to {host}:{port} failed '
+                f'(attempt {attempt}/{UPSTREAM_CONNECT_ATTEMPTS}): {error!r}',
+                file=sys.stderr, flush=True,
+            )
+            if attempt < UPSTREAM_CONNECT_ATTEMPTS:
+                time.sleep(UPSTREAM_RETRY_DELAY_SECONDS * attempt)
+    raise RuntimeError(
+        f'upstream {host}:{port} unreachable after '
+        f'{UPSTREAM_CONNECT_ATTEMPTS} attempts: {last_error!r}'
+    ) from last_error
+
+
 def forward_https(conn, host, port, request):
-    context = ssl.create_default_context(cafile=str(REAL_CA))
-    with socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT_SECONDS) as raw:
-        with context.wrap_socket(raw, server_hostname=host) as upstream:
-            upstream.sendall(close_request(request))
-            relay(upstream, conn)
+    with open_upstream(host, port, tls=True) as upstream:
+        upstream.sendall(close_request(request))
+        relay(upstream, conn)
 
 
 def forward_http(conn, host, port, request, target):
@@ -163,7 +214,7 @@ def forward_http(conn, host, port, request, target):
     path = parsed.path or '/'
     if parsed.query:
         path += f'?{parsed.query}'
-    with socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT_SECONDS) as upstream:
+    with open_upstream(host, port, tls=False) as upstream:
         upstream.sendall(close_request(request, path))
         relay(upstream, conn)
 
