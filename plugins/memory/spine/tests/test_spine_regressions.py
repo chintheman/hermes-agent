@@ -564,3 +564,48 @@ def test_open_waits_out_a_short_writer_collision_instead_of_failing(tmp_path):
     assert time.monotonic() - t >= 1.0
     assert released.is_set()
     idx.close()
+
+
+def test_dim_probe_waits_out_a_writer_instead_of_caching_a_miss(tmp_path, monkeypatch):
+    """embedding_dim()'s store probe used a bare connect with timeout=1.0.
+    Under a writer holding the DB longer than that it swallowed the BUSY,
+    cached the miss, and let the embedder answer -- so the first schema
+    create to see an empty dim_meta could stamp the model's width over the
+    store's. Review round 2 (2026-08-30) routed it through connect_db."""
+    import sqlite3 as _sq
+    from spine import index as _index
+    from spine.config import SpineConfig
+    db = str(tmp_path / "m.db")
+    # Raw rollback-journal store (no WAL): BEGIN EXCLUSIVE makes a mode=ro
+    # reader see SQLITE_BUSY, which is the only way to exercise the timeout.
+    boot = _sq.connect(db)
+    boot.execute("CREATE TABLE dim_meta (key TEXT PRIMARY KEY, value TEXT)")
+    # A width no embedder produces, so an accidental embedder answer cannot pass.
+    boot.execute("INSERT INTO dim_meta VALUES ('embedding_dim', '1234')")
+    boot.commit()
+    boot.close()
+
+    cfg = SpineConfig()
+    cfg.db = db
+    monkeypatch.setattr("spine.config.load_spine_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(_index, "_embedding_dim", None)
+    monkeypatch.setattr(_index, "_dim_probe_failed", False)
+
+    locked = threading.Event()
+
+    def _hold_exclusive():
+        holder = _sq.connect(db, timeout=1)
+        holder.execute("BEGIN EXCLUSIVE")
+        locked.set()
+        time.sleep(1.5)
+        holder.rollback()
+        holder.close()
+    threading.Thread(target=_hold_exclusive, daemon=True).start()
+    assert locked.wait(5)
+
+    t = time.monotonic()
+    width = _index.embedding_dim()
+    elapsed = time.monotonic() - t
+    assert width == 1234, width
+    assert elapsed >= 1.0, f"probe gave up after {elapsed:.2f}s instead of waiting"
+    assert _index._dim_probe_failed is False

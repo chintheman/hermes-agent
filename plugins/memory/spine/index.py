@@ -57,14 +57,20 @@ def embedding_dim() -> int:
     # a plain connect() materialised a zero-byte memory.db. Closed in finally:
     # the previous version skipped close() whenever the SELECT raised, and this
     # is called once per vector, so it leaked a descriptor per row.
+    #
+    # Through connect_db (review round 2, 2026-08-30): this probe used a bare
+    # connect with timeout=1.0, so under a long writer it gave up, cached the
+    # miss, and let the embedder answer -- a wrong width would then be stamped
+    # by the first _create_schema to see an empty dim_meta. The store is WAL,
+    # so a reader never actually waits on a writer; the 30s is for the
+    # rollback-journal edge only.
     if not _dim_probe_failed:
         con = None
         try:
-            import sqlite3 as _sq
             from .config import load_spine_config
             db = os.path.expanduser(load_spine_config().db)
             if os.path.exists(db):
-                con = _sq.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+                con = connect_db(f"file:{db}?mode=ro", uri=True)
                 row = con.execute(
                     "SELECT value FROM dim_meta WHERE key='embedding_dim'").fetchone()
                 if row:
@@ -90,11 +96,10 @@ def embedding_dim() -> int:
     # (locked DB or embedder not yet loaded) and the constant got stamped in.
     # The stored vectors cannot be wrong about their own width.
     try:
-        import sqlite3 as _sq
         from .config import load_spine_config
         db = os.path.expanduser(load_spine_config().db)
         if os.path.exists(db):
-            con = _sq.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+            con = connect_db(f"file:{db}?mode=ro", uri=True)
             try:
                 row = con.execute(
                     "SELECT LENGTH(embedding) FROM observations "
