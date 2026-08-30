@@ -14,7 +14,7 @@ import os
 import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import SpineConfig
 from .embedder import embedder_available, embed_single
@@ -167,47 +167,7 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
     now = _now_iso()
 
     # ── Pass 1: Decay ───────────────────────────────────────────────
-    decayed = 0
-    archived = 0
-    rows = idx.conn.execute(
-        "SELECT id, confidence, last_confirmed, last_retrieved, type FROM observations"
-        " WHERE status='active' AND profile = ?",
-        (profile,),
-    ).fetchall()
-    for row in rows:
-        obs_id, conf, last_confirmed, last_retrieved, obs_type = row
-        if conf is None:
-            continue
-        # Corrections carry the user's explicit words — the highest-value
-        # memory class. Never let idle decay archive them; they leave active
-        # status only via explicit demote/forget or supersede (2026-08-20,
-        # compaction-prompt-tuning: preserve decisions over age).
-        if obs_type == "correction":
-            continue
-        # Decay: confidence −0.05 per 30 idle days
-        # Use last_confirmed (or last_retrieved as fallback) to compute idle days
-        ref_date = last_confirmed or last_retrieved
-        if ref_date:
-            try:
-                from datetime import datetime, timezone as _tz
-                ref_dt = datetime.fromisoformat(ref_date)
-                days_idle = (datetime.now(_tz.utc) - ref_dt).days
-                if days_idle > 0:
-                    decay_units = days_idle / 30.0
-                    conf = conf - (decay_units * config.decay_per_30d)
-                    if conf < 0:
-                        conf = 0.0
-                    idx.conn.execute(
-                        "UPDATE observations SET confidence=? WHERE id=?",
-                        (round(conf, 4), obs_id),
-                    )
-            except (ValueError, TypeError):
-                pass
-        # Simple check: if below archive threshold, archive it
-        if conf < config.archive_threshold:
-            idx.update_status(obs_id, "archived")
-            archived += 1
-            decayed += 1
+    decayed, archived = _decay_pass(idx, config, profile)
     report["passes"]["decay"] = f"archived {archived} observations below threshold {config.archive_threshold}"
 
     # ── Pass 2: Merge near-duplicates ────────────────────────────────
@@ -812,6 +772,94 @@ def _shared_context(a_topics: str, b_topics: str, a_lower: str, b_lower: str) ->
     tok_a = {w for w in re.findall(r"[a-z]{4,}", a_lower) if w not in _CONTEXT_STOPWORDS}
     tok_b = {w for w in re.findall(r"[a-z]{4,}", b_lower) if w not in _CONTEXT_STOPWORDS}
     return bool(tok_a & tok_b)
+
+
+_DECAY_LAST_RUN_KEY = "decay_last_run:{profile}"
+
+
+def _decay_pass(idx: MemoryIndex, config: SpineConfig, profile: str,
+                now: Optional[datetime] = None) -> Tuple[int, int]:
+    """Age idle observations by config.decay_per_30d and archive the ones that
+    fall below config.archive_threshold. Returns (decayed, archived).
+
+    Decay is applied for the time elapsed SINCE THE LAST DECAY RUN, not since
+    the observation was last confirmed. The original pass subtracted
+    (days_idle / 30) * decay_per_30d from the already-decayed stored value on
+    every nightly run, so an observation idle for d days lost d/30 * 0.05
+    per NIGHT -- quadratic, not the documented -0.05 per 30 idle days. A 0.9
+    observation reached the 0.3 archive floor in ~27 nights instead of 360
+    days. Found 2026-08-30: the weekly retrieval benchmark regressed -11.8%
+    recall because the golden observations for four queries had been
+    archived by this runaway (53 agent:main rows archived Aug 19-29, every
+    one of them >= 0.3 under the intended linear schedule).
+
+    The last-run timestamp lives in dim_meta, keyed per profile, so a missed
+    night is caught up on the next run and a manual re-run within the same
+    day applies only the hours actually elapsed. On the first run after this
+    fix there is no stamp; we record one and apply no decay, rather than
+    guessing an elapsed window.
+    """
+    now = now or datetime.now(timezone.utc)
+    key = _DECAY_LAST_RUN_KEY.format(profile=profile)
+    row = idx.conn.execute(
+        "SELECT value FROM dim_meta WHERE key=?", (key,)).fetchone()
+    last_run: Optional[datetime] = None
+    if row:
+        try:
+            last_run = datetime.fromisoformat(row[0])
+        except (ValueError, TypeError):
+            last_run = None
+
+    decayed = 0
+    archived = 0
+    if last_run is not None:
+        rows = idx.conn.execute(
+            "SELECT id, confidence, last_confirmed, last_retrieved, type FROM observations"
+            " WHERE status='active' AND profile = ?",
+            (profile,),
+        ).fetchall()
+        for obs_id, conf, last_confirmed, last_retrieved, obs_type in rows:
+            if conf is None:
+                continue
+            # Corrections carry the user's explicit words — the highest-value
+            # memory class. Never let idle decay archive them; they leave active
+            # status only via explicit demote/forget or supersede (2026-08-20,
+            # compaction-prompt-tuning: preserve decisions over age).
+            if obs_type == "correction":
+                continue
+            ref_date = last_confirmed or last_retrieved
+            if not ref_date:
+                continue
+            try:
+                ref_dt = datetime.fromisoformat(ref_date)
+            except (ValueError, TypeError):
+                continue
+            if ref_dt.tzinfo is None:
+                ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+            # Idle window that has not been charged yet: from the later of
+            # (last confirmation, last decay run) up to now. A row confirmed
+            # after the last run is charged only for the time since that
+            # confirmation, so a fresh confirmation really does reset decay.
+            window_start = max(ref_dt, last_run)
+            idle_days = (now - window_start).total_seconds() / 86400.0
+            if idle_days <= 0:
+                continue
+            conf = max(0.0, conf - (idle_days / 30.0) * config.decay_per_30d)
+            idx.conn.execute(
+                "UPDATE observations SET confidence=? WHERE id=?",
+                (round(conf, 4), obs_id),
+            )
+            decayed += 1
+            if conf < config.archive_threshold:
+                idx.update_status(obs_id, "archived")
+                archived += 1
+
+    idx.conn.execute(
+        "INSERT OR REPLACE INTO dim_meta (key, value) VALUES (?, ?)",
+        (key, now.isoformat()),
+    )
+    idx.conn.commit()
+    return decayed, archived
 
 
 def _detect_contradictions(idx: MemoryIndex, profile: str) -> List[Dict[str, Any]]:

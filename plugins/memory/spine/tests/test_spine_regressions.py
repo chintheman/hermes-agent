@@ -414,3 +414,153 @@ def test_proposals_check_skips_when_there_is_no_queue():
         hb.PROPOSAL_DIR = os.path.join(tmp, "does-not-exist")
         status, _ = hb.check_proposals(cfg)
         assert status == hb.SKIP
+
+
+# ── 2026-08-30: quadratic decay + database-is-locked ─────────────────
+
+def _fresh_index(tmp_path):
+    from spine.index import MemoryIndex
+    idx = MemoryIndex(str(tmp_path / "m.db"))
+    idx.open()
+    idx._canonical_root = ""  # no JSONL write-back in tests
+    return idx
+
+
+def _seed(idx, obs_id, conf, last_confirmed, status="active", typ="fact"):
+    idx.conn.execute(
+        "INSERT INTO observations (id, profile, type, content, confidence, status, "
+        "created_at, last_confirmed) VALUES (?, 'agent:main', ?, ?, ?, ?, ?, ?)",
+        (obs_id, typ, f"content {obs_id}", conf, status, last_confirmed, last_confirmed))
+    idx.conn.commit()
+
+
+def test_decay_is_linear_in_elapsed_time_not_in_run_count(tmp_path):
+    """The old pass charged days_idle/30*rate on EVERY run: a 0.9 row idle 40
+    days lost ~0.067 per night and hit the 0.3 archive floor in weeks. The
+    charge must depend only on wall-clock elapsed since the last run."""
+    from datetime import datetime, timedelta, timezone
+    from spine.config import SpineConfig
+    idx = _fresh_index(tmp_path)
+    cfg = SpineConfig()  # decay_per_30d=0.05, archive_threshold=0.3
+    t0 = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    _seed(idx, "old", 0.9, (t0 - timedelta(days=40)).isoformat())
+
+    # First run: no stamp yet -> records the clock, charges nothing.
+    assert loops._decay_pass(idx, cfg, "agent:main", now=t0) == (0, 0)
+    assert idx.conn.execute("SELECT confidence FROM observations WHERE id='old'").fetchone()[0] == 0.9
+
+    # Ten "nightly" runs across 10 days: total charge is 10/30*0.05, not
+    # sum(days_idle/30*0.05) over 10 nights (which would be > 0.75).
+    for n in range(1, 11):
+        loops._decay_pass(idx, cfg, "agent:main", now=t0 + timedelta(days=n))
+    conf, status = idx.conn.execute(
+        "SELECT confidence, status FROM observations WHERE id='old'").fetchone()
+    assert abs(conf - (0.9 - 10 / 30 * 0.05)) < 1e-3, conf
+    assert status == "active"
+
+    # Re-running with no time elapsed is a no-op.
+    loops._decay_pass(idx, cfg, "agent:main", now=t0 + timedelta(days=10))
+    assert idx.conn.execute("SELECT confidence FROM observations WHERE id='old'").fetchone()[0] == conf
+
+
+def test_decay_catches_up_a_missed_night_and_respects_fresh_confirmation(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from spine.config import SpineConfig
+    idx = _fresh_index(tmp_path)
+    cfg = SpineConfig()
+    t0 = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    _seed(idx, "idle", 0.5, (t0 - timedelta(days=5)).isoformat())
+    loops._decay_pass(idx, cfg, "agent:main", now=t0)
+    # Confirmed 2 days into a 6-day gap: charged only for the 4 days since.
+    _seed(idx, "fresh", 0.5, (t0 + timedelta(days=2)).isoformat())
+    loops._decay_pass(idx, cfg, "agent:main", now=t0 + timedelta(days=6))
+    idle = idx.conn.execute("SELECT confidence FROM observations WHERE id='idle'").fetchone()[0]
+    fresh = idx.conn.execute("SELECT confidence FROM observations WHERE id='fresh'").fetchone()[0]
+    assert abs(idle - (0.5 - 6 / 30 * 0.05)) < 1e-3, idle
+    assert abs(fresh - (0.5 - 4 / 30 * 0.05)) < 1e-3, fresh
+
+
+def test_decay_still_archives_below_threshold_and_spares_corrections(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from spine.config import SpineConfig
+    idx = _fresh_index(tmp_path)
+    cfg = SpineConfig()
+    t0 = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    _seed(idx, "weak", 0.31, (t0 - timedelta(days=1)).isoformat())
+    _seed(idx, "corr", 0.31, (t0 - timedelta(days=1)).isoformat(), typ="correction")
+    loops._decay_pass(idx, cfg, "agent:main", now=t0)
+    decayed, archived = loops._decay_pass(idx, cfg, "agent:main", now=t0 + timedelta(days=30))
+    assert (decayed, archived) == (1, 1)
+    rows = dict(idx.conn.execute("SELECT id, status FROM observations").fetchall())
+    assert rows == {"weak": "archived", "corr": "active"}
+
+
+def test_open_sets_a_real_busy_timeout(tmp_path):
+    """sqlite3.connect() defaults to 5s; the 4-hourly Claude Code sync died
+    with 'database is locked' at its first write on 2026-08-30 because a
+    sibling writer held the WAL lock longer than that."""
+    from spine.index import DB_BUSY_TIMEOUT_S
+    idx = _fresh_index(tmp_path)
+    assert idx.conn.execute("PRAGMA busy_timeout").fetchone()[0] == int(DB_BUSY_TIMEOUT_S * 1000)
+    assert idx.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_open_on_an_existing_store_does_not_wait_for_the_write_lock(tmp_path):
+    """The dim_meta stamp was INSERT OR IGNORE on every open(), which takes
+    the write lock even when the row already exists -- so a read-only recall
+    queued behind whichever writer was active. Read first, insert only when
+    missing."""
+    import sqlite3 as _sq
+    from spine.index import MemoryIndex
+    db = str(tmp_path / "m.db")
+    boot = MemoryIndex(db)
+    boot.open()  # creates schema + stamp
+    boot.close()
+    holder = _sq.connect(db, timeout=1)
+    holder.execute("BEGIN IMMEDIATE")  # take and hold the write lock
+    try:
+        t = time.monotonic()
+        idx = MemoryIndex(db)
+        idx.open()
+        elapsed = time.monotonic() - t
+        idx.close()
+    finally:
+        holder.rollback()
+        holder.close()
+    assert elapsed < 1.0, f"open() blocked on the write lock for {elapsed:.1f}s"
+
+
+def test_open_waits_out_a_short_writer_collision_instead_of_failing(tmp_path):
+    """A sibling holding the write lock for longer than the old 5s default no
+    longer crashes the opener; it waits and proceeds."""
+    import sqlite3 as _sq
+    from spine.index import MemoryIndex
+    db = str(tmp_path / "m.db")
+    boot = MemoryIndex(db)
+    boot.open()
+    boot.close()
+    locked = threading.Event()
+    released = threading.Event()
+
+    def _hold_write_lock():
+        # sqlite3 connections are thread-bound: the holder lives here entirely.
+        holder = _sq.connect(db, timeout=1)
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("INSERT INTO dim_meta (key, value) VALUES ('probe', 'x')")
+        locked.set()
+        time.sleep(1.5)
+        holder.commit()
+        holder.close()
+        released.set()
+    threading.Thread(target=_hold_write_lock, daemon=True).start()
+    assert locked.wait(5)
+
+    idx = MemoryIndex(db)
+    idx.open()
+    t = time.monotonic()
+    # A real write from the opener: must block until the holder commits.
+    idx.conn.execute("INSERT INTO dim_meta (key, value) VALUES ('probe2', 'y')")
+    idx.conn.commit()
+    assert time.monotonic() - t >= 1.0
+    assert released.is_set()
+    idx.close()

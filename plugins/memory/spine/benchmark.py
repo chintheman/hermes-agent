@@ -73,7 +73,8 @@ def snapshot_db(live_db: str) -> str:
     fd, snap = tempfile.mkstemp(prefix="spine-bench-", suffix=".db")
     os.close(fd)
     os.unlink(snap)  # backup() requires the target to not exist
-    src = sqlite3.connect(live_db)
+    from spine.index import connect_db
+    src = connect_db(live_db)
     dst = sqlite3.connect(snap)
     try:
         src.backup(dst)
@@ -211,7 +212,8 @@ def structural_gate(db_path: str, bench_dir: str) -> List[str]:
         problems.append(f"DB missing: {live_db}")
         return problems
 
-    conn = sqlite3.connect(f"file:{live_db}?mode=ro", uri=True)
+    from spine.index import connect_db
+    conn = connect_db(f"file:{live_db}?mode=ro", uri=True)
     try:
         obs = conn.execute(
             "SELECT COUNT(*) FROM observations WHERE status IN ('active','promoted')"
@@ -262,8 +264,14 @@ def run_controls(config: Any, bench_dir: str) -> Dict[str, Any]:
 
 
 def save_report(report: Dict[str, Any], bench_dir: str) -> str:
-    """Save benchmark run to bench/run-<date>.json."""
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Save benchmark run to bench/run-<date>.json.
+
+    <date> is the LOCAL calendar date. It was UTC, so the weekly cron firing
+    at 04:36 SGT on the 30th wrote run-2026-08-29-*.json -- the file never
+    matched the cron log or the day the operator looked at. The report's own
+    `timestamp` field stays UTC ISO for machine comparison.
+    """
+    date_str = datetime.now().astimezone().strftime("%Y-%m-%d")
     run_dir = Path(bench_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
