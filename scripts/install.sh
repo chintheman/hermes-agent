@@ -492,6 +492,54 @@ configure_managed_node_npm_prefix() {
     printf 'prefix=%s\n' "$(dirname "$link_dir")" > "$HERMES_HOME/node/etc/npmrc"
 }
 
+# Follow symlinks to a path's final target, portably: `readlink -f` and
+# `realpath` are missing on older macOS, and this only needs to answer "is
+# this the same file?" for the checks below.
+resolve_symlinks() {
+    local target="$1" link dir
+    while [ -L "$target" ]; do
+        link="$(readlink "$target")" || break
+        case "$link" in
+            /*) target="$link" ;;
+            *)  target="$(dirname "$target")/$link" ;;
+        esac
+    done
+    dir="$(cd "$(dirname "$target")" 2>/dev/null && pwd -P)" || { printf '%s\n' "$target"; return 0; }
+    printf '%s/%s\n' "$dir" "$(basename "$target")"
+}
+
+# Build native addons against the Hermes-managed Node's own headers instead of
+# letting node-gyp download them.
+#
+# node-pty ships no Linux prebuild, so `npm install` falls through to a
+# node-gyp rebuild, and with no `nodedir` node-gyp fetches a ~10 MB headers
+# tarball for the running Node from nodejs.org on every fresh install -- over
+# its bundled undici client, which has no retry and dies with an uncatchable
+# `assert(!this.paused)` when the connection closes while the download is
+# paused under backpressure (nodejs/undici#5360). Behind a proxy that closes
+# after each response that is a coin flip: the install E2E lost it on ~40% of
+# scheduled runs as `npm error code 7` on node-pty. The managed Node tarball
+# already contains exactly those headers (include/node/*.h plus common.gypi;
+# node-gyp looks for include/node/common.gypi first, then <nodedir>/common.gypi),
+# so point node-gyp at them: no download, works offline, and it cannot mismatch
+# the running node because it is the tree that node was unpacked from.
+#
+# Managed Node only. Any other `node` on PATH has no known headers tree, and a
+# guessed one breaks node-gyp outright ("<dir>/common.gypi not found" -- see
+# dev-sandbox.sh on DEV_SANDBOX_NODE_DIR). The check goes through symlinks
+# because the managed node is normally reached via the command link dir. A
+# caller's own npm_config_nodedir always wins.
+configure_managed_node_gyp_headers() {
+    [ -z "${npm_config_nodedir:-}" ] || return 0
+    local managed_dir="$HERMES_HOME/node"
+    [ -f "$managed_dir/include/node/common.gypi" ] || return 0
+    local node_bin
+    node_bin="$(command -v node 2>/dev/null)" || return 0
+    [ "$(resolve_symlinks "$node_bin")" = "$(resolve_symlinks "$managed_dir/bin/node")" ] || return 0
+    export npm_config_nodedir="$managed_dir"
+    log_info "node-gyp will build against the Hermes-managed Node headers ($managed_dir/include/node)"
+}
+
 get_hermes_command_path() {
     local link_dir
     link_dir="$(get_command_link_dir)"
@@ -2318,6 +2366,8 @@ install_node_deps() {
         return 0
     fi
 
+    configure_managed_node_gyp_headers
+
     if [ -f "$INSTALL_DIR/package.json" ]; then
         log_info "Installing Node.js dependencies (browser tools)..."
         cd "$INSTALL_DIR"
@@ -3135,6 +3185,7 @@ install_desktop() {
     # the build never runs on a too-old system Node — the cause of the opaque
     # "Build desktop app … exit code 1" failure (Vite crashes on old Node).
     check_node
+    configure_managed_node_gyp_headers
     if ! command -v npm >/dev/null 2>&1; then
         log_error "Cannot build desktop app: Node.js / npm unavailable"
         log_info "Install Node.js and retry: cd $desktop_dir && npm run pack"
