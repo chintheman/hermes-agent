@@ -328,10 +328,10 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
                     break
                 remaining = _excise_block(blocks, content)
                 if remaining is None:
-                    # MEMORY.md has a second writer: the memory() tool and the
-                    # LLM-assisted consolidation pass rewrite and merge blocks
-                    # wholesale, so a promoted row's text may no longer appear
-                    # verbatim. Leave the row promoted rather than demoting one
+                    # MEMORY.md has a second writer: the memory() tool and
+                    # hotcore_consolidate.py's LLM-assisted pass rewrite and
+                    # merge blocks wholesale, so a promoted row's text may no
+                    # longer appear verbatim. Leave the row promoted rather than demoting one
                     # whose text could not be removed -- doing that empties the
                     # DB's view of the hot core while the file stays fat.
                     unmatched += 1
@@ -398,8 +398,9 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
                 why = "there are no promoted observations left to demote"
             warning = (
                 f"MEMORY.md is {mem_size:,} bytes, over the {20000:,} budget: {why}. "
-                f"Spine cannot shrink the file on its own — run the LLM-assisted "
-                f"consolidation pass."
+                f"The demote pass cannot shrink the file further — run the "
+                f"LLM-assisted consolidation pass: "
+                f"`python3 consolidate.py --hotcore` (spine/hotcore_consolidate.py)."
             )
             report.setdefault("warnings", []).append(warning)
             logger.warning(warning)

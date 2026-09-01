@@ -7,6 +7,8 @@ to wiki _system/ and delivers summary to #11.
 Usage:
     python3 consolidate.py
     python3 consolidate.py --dry-run
+    python3 consolidate.py --hotcore              # LLM-assisted MEMORY.md shrink
+    python3 consolidate.py --hotcore --dry-run
 """
 
 from __future__ import annotations
@@ -29,12 +31,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run spine consolidation cycle")
     parser.add_argument("--dry-run", action="store_true", help="Report only, don't modify")
+    parser.add_argument(
+        "--hotcore", action="store_true",
+        help="Run the LLM-assisted hot-core pass instead of the nightly cycle: "
+             "merge and compress MEMORY.md blocks until the file is under budget. "
+             "This is what the demote pass means when it warns that spine cannot "
+             "shrink the file on its own.")
     args = parser.parse_args()
 
     from spine.config import load_spine_config
     from spine.loops import run_consolidation
 
     config = load_spine_config()
+
+    if args.hotcore:
+        from spine.hotcore_consolidate import consolidate_hotcore, format_report as hotcore_report
+        report = consolidate_hotcore(config, dry_run=args.dry_run)
+        print(hotcore_report(report))
+        # Exit non-zero when the file is still over budget, so a cron or a shell
+        # loop can tell "shrank it" from "tried and could not". The heartbeat
+        # already treats over-budget as a failure; this must not disagree.
+        raise SystemExit(0 if report.get("reached_target", False) else 1)
 
     if args.dry_run:
         print("Dry run — would consolidate")

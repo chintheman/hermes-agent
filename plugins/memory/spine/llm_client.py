@@ -28,8 +28,15 @@ def call_llm(
     model: str = DEFAULT_MODEL,
     max_tokens: int = 2000,
     temperature: float = 0.3,
+    timeout: int = 60,
 ) -> Optional[str]:
-    """Call DeepSeek chat completions API. Returns response text or None on failure."""
+    """Call DeepSeek chat completions API. Returns response text or None on failure.
+
+    `timeout` is per-request seconds. 60 is fine for the short single-claim
+    calls the observer and merge passes make; a caller sending a batch with a
+    large max_tokens must raise it, or every call in the batch comes back None
+    and the caller silently keeps its originals believing the model refused.
+    """
     api_key = _get_api_key()
     if not api_key:
         logger.error("No DEEPSEEK_API_KEY in environment — cannot call LLM")
@@ -54,7 +61,7 @@ def call_llm(
             },
         )
 
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             return body["choices"][0]["message"]["content"]
     except Exception as e:
