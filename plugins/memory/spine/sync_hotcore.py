@@ -21,9 +21,22 @@ import argparse
 import json
 import os
 import sqlite3
-
-from spine.index import connect_db
 import sys
+
+# Path setup MUST precede the spine import. The same 2026-08-30 change that
+# broke heartbeat.py broke this file: a module-level `from spine.index import`
+# was added while the sys.path inserts stayed inside main(), so running it as a
+# script died with ModuleNotFoundError before main() was reached. This one is
+# worse than the heartbeat, because it is the guard that imports hot-core
+# blocks which exist nowhere else -- a MEMORY.md trim run while this is broken
+# destroys them permanently.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# spine/__init__.py imports agent.memory_provider, so the repo root has to be on
+# the path too or a manual run dies with ModuleNotFoundError: agent.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))))
+
+from spine.index import connect_db  # noqa: E402
 
 PROFILE = "agent:main"
 
@@ -33,11 +46,7 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    # spine/__init__.py imports agent.memory_provider, so the repo root has to
-    # be on the path too or a manual run dies with ModuleNotFoundError: agent.
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.abspath(__file__))))))
+    # sys.path is set at module level, above the spine import.
     from spine.config import load_spine_config
     from spine import coverage
     from spine.embedder import embedder_available
