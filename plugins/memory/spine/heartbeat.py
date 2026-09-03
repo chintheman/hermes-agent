@@ -36,10 +36,22 @@ import json
 import re
 import os
 import sqlite3
-
-from spine.index import connect_db
 import sys
 import time
+
+# The sys.path setup has to happen BEFORE the spine import, not inside main().
+# A module-level `from spine.index import ...` was added on 2026-08-30 while the
+# path inserts stayed in main(), so running this file as a script (which is how
+# the daily cron runs it) died with ModuleNotFoundError before main() was ever
+# reached. The heartbeat was down from 2026-08-30 to 09-03 and, because it is
+# the thing that reports silent failures, nothing reported its own.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# spine/__init__.py imports agent.memory_provider, so the repo root has to be on
+# the path too or this dies with ModuleNotFoundError: agent.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))))
+
+from spine.index import connect_db  # noqa: E402
 
 OK, FAIL, SKIP = "OK", "FAIL", "SKIP"
 

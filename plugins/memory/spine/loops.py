@@ -524,6 +524,143 @@ def _excise_block(blocks: List[str], content: str) -> Optional[List[str]]:
     return None
 
 
+# Calibrated on live data 2026-09-03, NOT inherited from _semantic_merge's 0.88
+# (tuned for merging whole observations; at 0.88 this caught nothing, because
+# the observer's rewordings sit far below it).
+#
+# Cosine ALONE cannot separate the two populations, which overlap:
+#   true duplicates   brain-updater family min 0.545, median 0.705
+#                     "[SILENT]" family    0.606 and 0.634
+#                     username family      min 0.584, median 0.770
+#   curated DISTINCT  75 hot-core blocks, 2,775 pairs: median 0.163,
+#                     p99 0.489, max 0.683
+#
+# 0.55 is safe only BECAUSE of the second signal. Measured across all 2,775
+# curated pairs, with _disagrees_on_specifics applied:
+#
+#   threshold   flagged by cosine   surviving the guard (= false positives)
+#     0.55             10                        0
+#     0.60              5                        0
+#     0.65              1                        0
+#
+# Every pair the cosine flags in that band differs on a number, path or
+# identifier, so the guard rejects all of them. Cosine-only at 0.55 would have
+# produced 10 wrong merges; with the guard it produces none, and it catches the
+# 0.606 / 0.634 duplicates that 0.70 let straight through into the hot core on
+# 2026-09-03.
+HOTCORE_DUP_COSINE = 0.55
+
+# Near-misses are logged, not acted on, so what the threshold misses stays
+# measurable instead of assumed.
+HOTCORE_DUP_NEARMISS = 0.45
+
+# Embedding the whole hot core on every candidate is the obvious waste here.
+# Keyed on the block set, so it survives across candidates and invalidates the
+# moment a write changes the file.
+_HOTCORE_EMB_CACHE: Dict[int, Any] = {}
+
+
+# Numbers, times, versions, ALL-CAPS identifiers, paths, env vars, flags.
+# Anything whose EXACT value is the point of the sentence.
+_HARD_TOKEN = re.compile(
+    r"\b\d[\d:._/-]*\b"           # 0.9, 09:00-12:00, 3.11.15, 2026-08-26
+    r"|\b[A-Z][A-Z0-9_]{3,}\b"     # DEEPSEEK_API_KEY, TOTO_JACKPOT
+    r"|~?/[\w./-]+"                # ~/.hermes/.env, api/draw.ts
+    r"|--[\w-]+"                   # --push, --no-verify
+)
+
+
+def _hard_tokens(text: str) -> set:
+    return set(_HARD_TOKEN.findall(text or ""))
+
+
+def _disagrees_on_specifics(candidate: str, existing: str) -> bool:
+    """Does `candidate` carry an exact value that `existing` does not?
+
+    The second signal, and the reason cosine alone cannot be trusted here.
+    Measured on the live embedder:
+
+        "peak billing is 09:00-12:00 SGT"
+        "peak billing is 14:00-18:00 SGT"   cosine 0.974
+
+    Those are two halves of one real fact in Chin's hot core, and a cosine-only
+    check merges them and silently deletes a billing window. Same shape for
+    "entry 0" vs "entry 1" (0.888) and any pair of sibling facts that differ
+    only by a version, a path, a topic id or a flag.
+
+    So a high cosine is necessary but not sufficient: if the candidate mentions
+    a number, identifier, path or flag the existing block never mentions, it is
+    a SIBLING fact, not a rewording. Deterministic, per the house rule that
+    exactness gets enforced in code rather than inferred by a model.
+    """
+    return bool(_hard_tokens(candidate) - _hard_tokens(existing))
+
+
+def _hotcore_semantic_duplicate(body: str, block_bodies: List[str]) -> Optional[str]:
+    """Is `body` a REWORDING of something already in the hot core?
+
+    Exact body match is the caller's job and is free. This catches what exact
+    match structurally cannot, which is the failure that actually happened: the
+    observer keeps re-forming the same fact in new words, every copy clears the
+    0.9 confidence gate, and every copy promotes. Measured on the live store
+    before this existed: 53 rows restating the brain-updater workflow, 31
+    restating the macOS username, 9 restating the timezone. One promote pass
+    pushed 10 rows into the hot core and 7 were rewordings of content already
+    there, displacing older blocks that had to be demoted to make room.
+
+    Returns the matching block body, or None.
+
+    Returns None when the embedder is unavailable, which degrades to
+    exact-match-only rather than blocking promotion. That is deliberate: a
+    duplicate in the hot core is a cost, but a promote pass that silently stops
+    promoting is an outage. The warning is logged so it is not silent.
+    """
+    if not body or not block_bodies:
+        return None
+    try:
+        from . import embedder
+        if not embedder.embedder_available():
+            logger.warning(
+                "hot-core dedupe degraded to exact match: embedder unavailable")
+            return None
+
+        key = hash(tuple(block_bodies))
+        cached = _HOTCORE_EMB_CACHE.get(key)
+        if cached is None:
+            cached = embedder.embed(block_bodies)
+            _HOTCORE_EMB_CACHE.clear()   # only ever hold the current file
+            _HOTCORE_EMB_CACHE[key] = cached
+
+        cand = embedder.embed_single(body)
+        best, best_i = 0.0, -1
+        for i, vec in enumerate(cached):
+            num = sum(a * b for a, b in zip(cand, vec))
+            da = sum(a * a for a in cand) ** 0.5
+            db = sum(b * b for b in vec) ** 0.5
+            if not da or not db:
+                continue
+            cos = num / (da * db)
+            if cos > best:
+                best, best_i = cos, i
+        if best >= HOTCORE_DUP_COSINE:
+            if _disagrees_on_specifics(body, block_bodies[best_i]):
+                logger.info(
+                    "hot-core: cos=%.3f but specifics differ, treating as a "
+                    "sibling fact not a reword: %.60s", best, body)
+                return None
+            logger.info("hot-core near-duplicate (cos=%.3f): %.60s", best, body)
+            return block_bodies[best_i]
+        if best >= HOTCORE_DUP_NEARMISS:
+            # Deliberately NOT treated as a duplicate. Logged so the
+            # under-catching is measurable rather than assumed.
+            logger.info("hot-core near-MISS (cos=%.3f, below %.2f): %.60s",
+                        best, HOTCORE_DUP_COSINE, body)
+    except Exception as e:  # noqa: BLE001
+        # A broken dedupe must not take the promote pass down with it.
+        logger.warning("hot-core dedupe check failed, falling back to exact: %s", e)
+    return None
+
+
 def _promote_to_hotcore(obs_id: str, content: str, obs_type: str,
                         config: SpineConfig) -> str:
     """Append an observation to the MEMORY.md hot core.
@@ -553,8 +690,17 @@ def _promote_to_hotcore(obs_id: str, content: str, obs_type: str,
             # matched and appended a second block: a duplication engine inside
             # the file injected into every system prompt. Everything else in the
             # system (excise, coverage) already compares bodies.
-            if _block_body(entry) in {_block_body(b) for b in blocks}:
+            bodies = [_block_body(b) for b in blocks]
+            if _block_body(entry) in set(bodies):
                 logger.debug("Skipped promoting %s — already in MEMORY.md", obs_id)
+                return "duplicate"
+            # Exact match only catches a byte-identical restatement. The
+            # observer rewords, so the same fact arrives again under new
+            # wording and promotes again. See _hotcore_semantic_duplicate.
+            near = _hotcore_semantic_duplicate(_block_body(entry), bodies)
+            if near is not None:
+                logger.debug("Skipped promoting %s — reword of an existing block",
+                             obs_id)
                 return "duplicate"
             _write_hotcore_blocks(mem_path, blocks + [entry])
         logger.info("Promoted %s to MEMORY.md: %s", obs_id, content[:80])

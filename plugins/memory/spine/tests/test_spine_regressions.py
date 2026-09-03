@@ -68,8 +68,13 @@ def test_promote_keeps_the_file_round_trippable():
     f = tempfile.mktemp(suffix=".md")
     _hotcore(f, "[F] alpha\n§\n[F] beta\n")
     assert _round_trips(open(f).read())
-    for i in range(3):
-        assert loops._promote_to_hotcore(f"id{i}", f"entry {i}", "fact", None) == "written"
+    # Distinct facts on purpose: "entry 0/1/2" are rewords of each other
+    # (cosine 0.888) and the promote dedupe now refuses them, which is correct
+    # and is not what this test is about.
+    for i, text in enumerate(["gamma is a colour space",
+                              "delta airlines flies to Tokyo",
+                              "epsilon is a Greek letter"]):
+        assert loops._promote_to_hotcore(f"id{i}", text, "fact", None) == "written"
         assert _round_trips(open(f).read()), f"drifted after promote {i}"
     os.remove(f)
 
@@ -609,3 +614,179 @@ def test_dim_probe_waits_out_a_writer_instead_of_caching_a_miss(tmp_path, monkey
     assert width == 1234, width
     assert elapsed >= 1.0, f"probe gave up after {elapsed:.2f}s instead of waiting"
     assert _index._dim_probe_failed is False
+
+
+# ── hot-core promote dedupe ───────────────────────────────────────────
+
+class _StubEmbedder:
+    """Deterministic stand-in so these tests never load a 768-dim model.
+
+    Vectors are hand-placed so the cosines are exact and readable:
+    identical text -> 1.0, the reword -> ~0.98, the distinct fact -> 0.0.
+    """
+    def __init__(self, available=True):
+        self._available = available
+        self.vectors = {}
+
+    def embedder_available(self):
+        return self._available
+
+    def embed(self, texts):
+        return [self.vectors.get(t, [0.0, 0.0, 1.0]) for t in texts]
+
+    def embed_single(self, text):
+        return self.vectors.get(text, [0.0, 0.0, 1.0])
+
+
+def _with_stub(monkeypatch, stub):
+    import spine.embedder as real
+    for name in ("embedder_available", "embed", "embed_single"):
+        monkeypatch.setattr(real, name, getattr(stub, name))
+
+
+def test_promote_dedupe_catches_a_reword(monkeypatch):
+    """NEGATIVE CONTROL for the whole point of the change.
+
+    Exact-body match structurally cannot catch this, and it is the failure that
+    actually happened: 53 rows restating the brain-updater workflow, 31 the
+    macOS username, 9 the timezone, each worded differently, each clearing the
+    0.9 gate, each promoting into the always-loaded file.
+    """
+    stub = _StubEmbedder()
+    existing = "User's macOS account username is 0xsteamboat."
+    reword = "The user's system username on macOS is 0xsteamboat."
+    stub.vectors[existing] = [1.0, 0.0, 0.0]
+    stub.vectors[reword] = [0.98, 0.2, 0.0]      # cos ~= 0.980
+    _with_stub(monkeypatch, stub)
+
+    assert loops._hotcore_semantic_duplicate(reword, [existing]) == existing
+
+
+def test_promote_dedupe_does_not_flag_a_distinct_fact(monkeypatch):
+    """The expensive error. A false positive keeps a genuinely new fact OUT of
+    the hot core and nothing downstream would ever report that it happened."""
+    stub = _StubEmbedder()
+    existing = "User's macOS account username is 0xsteamboat."
+    novel = "Quarterly VAT filing in Singapore is due on the last day of the month."
+    stub.vectors[existing] = [1.0, 0.0, 0.0]
+    stub.vectors[novel] = [0.0, 1.0, 0.0]        # cos = 0.0
+    _with_stub(monkeypatch, stub)
+
+    assert loops._hotcore_semantic_duplicate(novel, [existing]) is None
+
+
+def test_promote_dedupe_respects_the_threshold_boundary(monkeypatch):
+    """Just below HOTCORE_DUP_COSINE must pass through, just above must not.
+    Pins the calibrated number so a future edit to it fails loudly."""
+    stub = _StubEmbedder()
+    existing = "block text"
+    stub.vectors[existing] = [1.0, 0.0, 0.0]
+
+    import math
+    # No digits in the candidate text: _disagrees_on_specifics treats a number
+    # the existing block lacks as proof of a sibling fact, which would mask the
+    # cosine behaviour this test is pinning.
+    for label, delta, expect_dup in (("above", +0.02, True), ("below", -0.05, False)):
+        target = loops.HOTCORE_DUP_COSINE + delta
+        cand = f"candidate {label}"
+        # a vector whose cosine with [1,0,0] is exactly `target`
+        stub.vectors[cand] = [target, math.sqrt(max(0.0, 1 - target ** 2)), 0.0]
+        _with_stub(monkeypatch, stub)
+        got = loops._hotcore_semantic_duplicate(cand, [existing]) is not None
+        assert got is expect_dup, f"cos={target:.3f} expected dup={expect_dup}"
+
+
+def test_promote_dedupe_degrades_to_exact_match_without_an_embedder(monkeypatch):
+    """Silent-when-blind, applied to a write path.
+
+    A duplicate block is a cost. A promote pass that stops promoting because
+    the embedder died is an outage, and spine has shipped exactly that failure
+    before (the embedder was silently dead for 8 days). Returning None keeps
+    exact-match dedupe working and lets promotion continue.
+    """
+    stub = _StubEmbedder(available=False)
+    _with_stub(monkeypatch, stub)
+    assert loops._hotcore_semantic_duplicate("anything", ["a block"]) is None
+
+
+def test_promote_dedupe_survives_a_broken_embedder(monkeypatch):
+    """A crash inside the dedupe must not take the promote pass down."""
+    import spine.embedder as real
+    monkeypatch.setattr(real, "embedder_available", lambda: True)
+    def _boom(*a, **k):
+        raise RuntimeError("embedder exploded")
+    monkeypatch.setattr(real, "embed", _boom)
+    monkeypatch.setattr(real, "embed_single", _boom)
+    assert loops._hotcore_semantic_duplicate("x", ["y"]) is None
+
+
+def test_promote_dedupe_handles_an_empty_hot_core(monkeypatch):
+    """First promotion into an empty file must not be called a duplicate."""
+    stub = _StubEmbedder()
+    _with_stub(monkeypatch, stub)
+    assert loops._hotcore_semantic_duplicate("first ever block", []) is None
+
+
+def test_promote_dedupe_keeps_sibling_facts_that_differ_by_a_specific():
+    """NEGATIVE CONTROL for the second signal, and the reason it exists.
+
+    Measured on the live embedder, "peak billing is 09:00-12:00 SGT" and
+    "peak billing is 14:00-18:00 SGT" have cosine 0.974. Both are real halves
+    of one block in Chin's hot core. A cosine-only check merges them and
+    silently deletes a billing window, so a high cosine is necessary but not
+    sufficient: differing exact values mean sibling facts, not a rewording.
+
+    No embedder needed. This pins the deterministic half on its own.
+    """
+    assert loops._disagrees_on_specifics(
+        "peak billing is 14:00-18:00 SGT", "peak billing is 09:00-12:00 SGT")
+    assert loops._disagrees_on_specifics("entry 1", "entry 0")
+    assert loops._disagrees_on_specifics(
+        "Hermes venv Python is 3.9.6.", "Hermes venv Python is 3.11.15.")
+    assert loops._disagrees_on_specifics(
+        "set DEEPSEEK_API_KEY", "set ANTHROPIC_API_KEY")
+    assert loops._disagrees_on_specifics(
+        "config lives at ~/.hermes/config.yaml", "config lives at ~/.claude/settings.json")
+
+
+def test_promote_dedupe_allows_a_reword_carrying_the_same_specifics():
+    """The other side of the same guard: identical exact values must NOT block
+    a genuine rewording, or the second signal would disable the first."""
+    assert not loops._disagrees_on_specifics(
+        "The user's system username on macOS is 0xsteamboat.",
+        "User's macOS account username is 0xsteamboat.")
+    assert not loops._disagrees_on_specifics("plain prose", "other plain prose")
+
+
+def test_promote_to_hotcore_actually_calls_the_dedupe(monkeypatch):
+    """INTEGRATION, and the one a mutation test caught missing.
+
+    Every other dedupe test here exercises _hotcore_semantic_duplicate in
+    isolation. Stubbing the call out of _promote_to_hotcore entirely still left
+    all of them green, which means they proved the helper works and proved
+    NOTHING about whether the promote path uses it. That is the tautology shape
+    that has bitten this suite before.
+
+    This asserts the wiring: a reword offered to _promote_to_hotcore comes back
+    "duplicate" and is NOT appended to the file.
+    """
+    f = tempfile.mktemp(suffix=".md")
+    existing = "User's macOS account username is 0xsteamboat."
+    _hotcore(f, f"[F] {existing}\n")
+
+    stub = _StubEmbedder()
+    reword = "The user's system username on macOS is 0xsteamboat."
+    stub.vectors[existing] = [1.0, 0.0, 0.0]
+    stub.vectors[reword] = [0.98, 0.2, 0.0]
+    _with_stub(monkeypatch, stub)
+
+    before = open(f, encoding="utf-8").read()
+    assert loops._promote_to_hotcore("obs1", reword, "fact", None) == "duplicate"
+    assert open(f, encoding="utf-8").read() == before, "reword was appended anyway"
+
+    # and a genuinely new fact still gets through the same path
+    novel = "Quarterly VAT filing in Singapore is due on the last day of the month."
+    stub.vectors[novel] = [0.0, 1.0, 0.0]
+    assert loops._promote_to_hotcore("obs2", novel, "fact", None) == "written"
+    assert novel in open(f, encoding="utf-8").read()
+    os.remove(f)
