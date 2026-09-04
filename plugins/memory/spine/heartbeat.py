@@ -69,6 +69,9 @@ SYNC_STALE_HOURS = 12             # cron runs every 4h; 3 misses is a real fault
 CONSOLIDATE_STALE_HOURS = 48      # cron runs daily
 EVAL_REGRESSION_TOLERANCE = 0     # any drop below baseline is a regression
 
+WIKI_INDEX_DIR = os.path.expanduser("~/.hermes/wiki_index")
+WIKI_INDEX_STALE_HOURS = 48       # LaunchAgent runs daily; 2 misses is a real fault
+
 
 def check_embedder(cfg):
     from spine import embedder
@@ -485,11 +488,63 @@ def check_fts_index(cfg):
     return OK, "obs/wiki FTS indexes match row counts, porter tokenizer present"
 
 
+def check_wiki_index(cfg):
+    """Watch the wiki semantic index for the staleness that already happened.
+
+    2026-09-04: index.faiss was last built 2026-06-12 and nothing had rebuilt
+    it in the 84 days since. It was never automated at all — no cron, no
+    LaunchAgent, one manual run in June. So Hermes `/wiki_search` and
+    session-kickoff §0g kept answering from a June snapshot of a vault that had
+    grown to 1,207 indexable notes. Same shape as the `embedder` check above:
+    it never errored, it just answered from the past.
+
+    Also asserts the metadata/vector alignment invariant. wiki-search.py maps a
+    FAISS row position straight into metadata[idx], with no dedup and no bounds
+    reconciliation, so if those two files ever drift out of step every result
+    silently points at the wrong note.
+    """
+    index_file = os.path.join(WIKI_INDEX_DIR, "index.faiss")
+    meta_file = os.path.join(WIKI_INDEX_DIR, "metadata.jsonl")
+    vecs_file = os.path.join(WIKI_INDEX_DIR, "vectors.npy")
+
+    if not os.path.exists(index_file):
+        return SKIP, "no wiki index on disk — embedder has never run"
+
+    problems = []
+    age_h = (time.time() - os.path.getmtime(index_file)) / 3600
+    if age_h > WIKI_INDEX_STALE_HOURS:
+        problems.append(
+            f"index.faiss is {age_h / 24:.1f}d old (limit "
+            f"{WIKI_INDEX_STALE_HOURS}h) — me.0xsteamboat.wiki-embedder "
+            f"is not running")
+
+    rows = None
+    if os.path.exists(meta_file):
+        with open(meta_file) as fh:
+            rows = sum(1 for line in fh if line.strip())
+
+    if os.path.exists(vecs_file) and rows is not None:
+        import numpy as np
+        # mmap: read the header and shape, never pull 11MB of floats into a
+        # heartbeat that is supposed to be cheap enough to run daily.
+        n_vecs = np.load(vecs_file, mmap_mode="r").shape[0]
+        if rows != n_vecs:
+            problems.append(
+                f"metadata.jsonl has {rows} rows but vectors.npy has "
+                f"{n_vecs} — search results would point at the wrong notes")
+
+    if problems:
+        return FAIL, "; ".join(problems)
+    return OK, (f"wiki index {age_h:.0f}h old"
+                + (f", {rows} chunks aligned" if rows is not None else ""))
+
+
 CHECKS = [
     ("embedder", check_embedder),
     ("vectors", check_vectors),
     ("vector_width", check_vector_width),
     ("fts_index", check_fts_index),
+    ("wiki_index", check_wiki_index),
     ("hotcore", check_hotcore),
     ("hotcore_coverage", check_hotcore_coverage),
     ("sync", check_sync),
