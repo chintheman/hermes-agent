@@ -69,6 +69,9 @@ SYNC_STALE_HOURS = 12             # cron runs every 4h; 3 misses is a real fault
 CONSOLIDATE_STALE_HOURS = 48      # cron runs daily
 EVAL_REGRESSION_TOLERANCE = 0     # any drop below baseline is a regression
 
+HOTCORE_PATH = os.path.expanduser("~/.hermes/memories/MEMORY.md")
+RULE_WATERMARK = os.path.expanduser("~/.hermes/state/hotcore-rule-watermark.json")
+
 WIKI_INDEX_DIR = os.path.expanduser("~/.hermes/wiki_index")
 WIKI_INDEX_STALE_HOURS = 48       # LaunchAgent runs daily; 2 misses is a real fault
 
@@ -539,6 +542,51 @@ def check_wiki_index(cfg):
                 + (f", {rows} chunks aligned" if rows is not None else ""))
 
 
+def check_hotcore_rules(cfg):
+    """[R] rules are permanent. Assert the count never drops.
+
+    2026-09-05: the consolidation cron was told, in capitals, never to touch a
+    block tagged [R]. It compressed one anyway — the two-Macs rule — folding it
+    into an untagged block and dropping the fact that the M1 and M4 are in
+    different physical locations. Nothing was permanently lost, because the
+    coverage step had already pushed every block into spine, but the hot core
+    lost a rule and its protection tag in one pass and nothing noticed.
+
+    A prompt instruction has a non-zero failure rate; a count comparison does
+    not. This is the deterministic half of that rule.
+
+    The watermark is the high-water mark of [R] blocks ever seen. Deleting a
+    rule on purpose is legitimate, so the failure message says how to accept the
+    new count rather than treating every drop as corruption.
+    """
+    if not os.path.exists(HOTCORE_PATH):
+        return SKIP, "no MEMORY.md on disk"
+
+    with open(HOTCORE_PATH, encoding="utf-8", errors="ignore") as fh:
+        current = sum(1 for line in fh if line.startswith("[R]"))
+
+    mark = None
+    if os.path.exists(RULE_WATERMARK):
+        try:
+            mark = json.load(open(RULE_WATERMARK, encoding="utf-8")).get("rules")
+        except (json.JSONDecodeError, OSError):
+            mark = None
+
+    if mark is None or current > mark:
+        os.makedirs(os.path.dirname(RULE_WATERMARK), exist_ok=True)
+        with open(RULE_WATERMARK, "w", encoding="utf-8") as fh:
+            json.dump({"rules": current, "updated": time.strftime("%Y-%m-%dT%H:%M:%S")}, fh)
+        return OK, f"{current} [R] rules (watermark set)"
+
+    if current < mark:
+        return FAIL, (f"MEMORY.md has {current} [R] rules but {mark} were seen "
+                      f"before — a permanent rule was removed or lost its tag. "
+                      f"Restore it, or if the deletion was deliberate update "
+                      f"{RULE_WATERMARK}")
+
+    return OK, f"{current} [R] rules, none lost"
+
+
 CHECKS = [
     ("embedder", check_embedder),
     ("vectors", check_vectors),
@@ -546,6 +594,7 @@ CHECKS = [
     ("fts_index", check_fts_index),
     ("wiki_index", check_wiki_index),
     ("hotcore", check_hotcore),
+    ("hotcore_rules", check_hotcore_rules),
     ("hotcore_coverage", check_hotcore_coverage),
     ("sync", check_sync),
     ("divergence", check_divergence),
