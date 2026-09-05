@@ -62,6 +62,32 @@ def _send_secrets_alert(target: str, text: str) -> None:
         asyncio.run(_send())
 
 
+def _scope_filter_enabled() -> bool:
+    """Read memory.scope_filter from the live Hermes config, cached.
+
+    Defaults to False. Both halves of scope filtering read the same flag, so
+    they can never be half-on: snapshot filtered with nothing delivering it, or
+    context delivered on top of a snapshot that already has it.
+    """
+    global _SCOPE_FLAG
+    if _SCOPE_FLAG is not None:
+        return _SCOPE_FLAG
+    val = False
+    try:
+        import yaml
+        cfg_path = os.path.expanduser("~/.hermes/config.yaml")
+        with open(cfg_path, encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        val = bool((cfg.get("memory") or {}).get("scope_filter", False))
+    except Exception:
+        val = False
+    _SCOPE_FLAG = val
+    return val
+
+
+_SCOPE_FLAG = None
+
+
 class SpineProvider(MemoryProvider):
     """Hermes Memory v2 — "The Sleeping Brain" provider."""
 
@@ -129,7 +155,36 @@ class SpineProvider(MemoryProvider):
             self._shadow_record(query)
         except Exception as exc:  # never let shadow logging break a turn
             logger.debug("rule_scope shadow failed (non-fatal): %s", exc)
+
+        # Deliver the other half of scope filtering. When memory.scope_filter is
+        # on, the frozen snapshot carries only universal and [R] entries, so a
+        # tagged rule reaches the model ONLY through here. When it is off the
+        # snapshot already has everything and injecting would duplicate, so this
+        # stays silent. The two halves are gated by the same config flag.
+        try:
+            if _scope_filter_enabled():
+                self._prefetch_cache = self._build_scoped_context(query)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rule_scope delivery failed (non-fatal): %s", exc)
         return None
+
+    def _build_scoped_context(self, query: str, tool_name: str = "",
+                             has_image: bool = False) -> str:
+        """Rules this turn needs that the frozen snapshot does not already hold."""
+        from .rule_scope import TurnContext, deliverable, split_blocks
+
+        hotcore = os.path.expanduser("~/.hermes/memories/MEMORY.md")
+        if not os.path.exists(hotcore):
+            return ""
+        with open(hotcore, encoding="utf-8", errors="ignore") as fh:
+            blocks = split_blocks(fh.read())
+        extra = deliverable(blocks, TurnContext(query=query or "",
+                                                tool_name=tool_name,
+                                                has_image=has_image))
+        if not extra:
+            return ""
+        body = "\n".join(f"- {b}" for b in extra)
+        return ("[MEMORY — rules relevant to this turn]\n" + body)
 
     # Shadow-mode instrumentation ---------------------------------------
 

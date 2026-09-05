@@ -127,3 +127,118 @@ def test_summarise_reports_byte_savings():
 def test_reachable_kinds_covers_every_kind_fires_understands():
     for kind in reachable_kinds():
         assert kind in {UNIVERSAL, SUBJECT, TOOL, IMAGE}
+
+
+# ── deliverable(): the snapshot + delivery must lose nothing ──
+
+from spine.rule_scope import deliverable  # noqa: E402
+
+SAMPLE = [
+    "[R] constitution rule",
+    "[C] universal correction",
+    "[W] garmin note @when:tool=garmin_*",
+    "[C] screenshot rule @when:image",
+    "[W] ledger note @when:subject=ledger",
+]
+
+
+def _snapshot():
+    """What the frozen system-prompt snapshot holds: empty-context selection."""
+    hot, _ = select(SAMPLE, TurnContext())
+    return hot
+
+
+def test_snapshot_is_exactly_universal_and_rules():
+    assert _snapshot() == ["[R] constitution rule", "[C] universal correction"]
+
+
+def test_delivery_never_duplicates_the_snapshot():
+    extra = deliverable(SAMPLE, TurnContext(query="ledger check"))
+    assert not set(extra) & set(_snapshot())
+
+
+def test_nothing_is_lost_for_any_turn():
+    """snapshot + delivered must cover every block that fires. The whole design
+    rests on this: a rule that fires but reaches neither is silently gone."""
+    contexts = [
+        TurnContext(),
+        TurnContext(query="ledger check"),
+        TurnContext(query="anything", has_image=True),
+        TurnContext(tool_name="garmin_get_activities"),
+        TurnContext(query="ledger", tool_name="garmin_x", has_image=True),
+    ]
+    for ctx in contexts:
+        should_fire, _ = select(SAMPLE, ctx)
+        delivered = set(_snapshot()) | set(deliverable(SAMPLE, ctx))
+        missing = set(should_fire) - delivered
+        assert not missing, f"lost {missing} for {ctx}"
+
+
+def test_delivery_is_empty_when_nothing_extra_fires():
+    assert deliverable(SAMPLE, TurnContext(query="totally unrelated")) == []
+
+
+def test_rule_blocks_are_never_delivered_twice():
+    # [R] is always in the snapshot, so it must never appear in the delta.
+    extra = deliverable(SAMPLE, TurnContext(query="ledger", has_image=True))
+    assert not any(b.startswith("[R]") for b in extra)
+
+
+# ── the dangerous one: filtering the snapshot must never reach disk ──
+
+def test_scope_filter_never_shrinks_what_gets_persisted(tmp_path, monkeypatch):
+    """If a write path ever read the filtered snapshot, enabling scoping would
+    delete every tagged rule from MEMORY.md. save_to_disk must always persist
+    live entries, which the filter does not touch."""
+    import tools.memory_tool as mt
+
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir()
+    blocks = [
+        "[R] constitution rule",
+        "[C] universal correction",
+        "[W] garmin note @when:tool=garmin_*",
+        "[C] screenshot rule @when:image",
+    ]
+    (mem_dir / "MEMORY.md").write_text("\n§\n".join(blocks), encoding="utf-8")
+    (mem_dir / "USER.md").write_text("", encoding="utf-8")
+    monkeypatch.setattr(mt, "get_memory_dir", lambda: mem_dir)
+
+    store = mt.MemoryStore(memory_char_limit=90000, user_char_limit=1375,
+                           memory_enabled=True, user_profile_enabled=True,
+                           scope_filter=True)
+    store.load_from_disk()
+
+    # The snapshot IS filtered ...
+    snap = store._system_prompt_snapshot["memory"]
+    assert "@when:" not in snap
+    assert "garmin note" not in snap
+
+    # ... but live state is whole, and so is anything persisted from it.
+    assert len(store.memory_entries) == len(blocks)
+    store.save_to_disk("memory")
+    on_disk = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+    for b in blocks:
+        assert b in on_disk, f"scope filter destroyed {b!r} on disk"
+
+
+def test_scope_filter_off_is_byte_identical_to_unfiltered(tmp_path, monkeypatch):
+    """The flag must be a true no-op when off — the revert path depends on it."""
+    import tools.memory_tool as mt
+
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir()
+    (mem_dir / "MEMORY.md").write_text(
+        "[C] plain\n§\n[W] tagged @when:image", encoding="utf-8")
+    (mem_dir / "USER.md").write_text("", encoding="utf-8")
+    monkeypatch.setattr(mt, "get_memory_dir", lambda: mem_dir)
+
+    def build(flag):
+        s = mt.MemoryStore(memory_char_limit=90000, user_char_limit=1375,
+                           memory_enabled=True, user_profile_enabled=True,
+                           scope_filter=flag)
+        s.load_from_disk()
+        return s._system_prompt_snapshot["memory"]
+
+    assert "tagged" in build(False)
+    assert "tagged" not in build(True)

@@ -268,6 +268,7 @@ class MemoryStore:
     def __init__(
         self,
         memory_char_limit: int = 2200,
+        scope_filter: bool = False,
         user_char_limit: int = 1375,
         *,
         memory_enabled: bool = True,
@@ -276,6 +277,7 @@ class MemoryStore:
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
+        self.scope_filter = scope_filter
         self.user_char_limit = user_char_limit
         self.memory_enabled = memory_enabled
         self.user_profile_enabled = user_profile_enabled
@@ -349,11 +351,57 @@ class MemoryStore:
         sanitized_memory = self._sanitize_entries_for_snapshot(self.memory_entries, "MEMORY.md")
         sanitized_user = self._sanitize_entries_for_snapshot(self.user_entries, "USER.md")
 
+        # Trigger scoping (hotcore-retrieval-split phase 4). Entries carrying a
+        # @when: marker whose trigger is not universal leave the SNAPSHOT only —
+        # spine's prefetch() delivers them into the turn that actually needs
+        # them. Live state (memory_entries) is untouched, so the memory tool and
+        # spine both still see the whole file.
+        #
+        # Filtering happens here, once, at snapshot build. It must not be
+        # per-turn: the snapshot is deliberately frozen for the session to hold
+        # the prefix-cache invariant, and re-filtering each turn would break the
+        # exact thing that freeze protects.
+        #
+        # Fails OPEN. Any error keeps every entry, because a missing behavioural
+        # rule is invisible — the agent just misbehaves — while an extra one only
+        # costs tokens.
+        if self.scope_filter:
+            try:
+                sanitized_memory = self._scope_filter_entries(sanitized_memory)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Hot-core scope filter failed, loading every entry: %s", exc)
+
         # Capture frozen snapshot for system prompt injection
         self._system_prompt_snapshot = {
             "memory": self._render_block("memory", sanitized_memory),
             "user": self._render_block("user", sanitized_user),
         }
+
+    @staticmethod
+    def _scope_filter_entries(entries: List[str]) -> List[str]:
+        """Keep entries that belong in EVERY prompt; drop the trigger-scoped ones.
+
+        Universal entries (no @when: marker) and [R] rules always survive — both
+        guarantees are enforced inside rule_scope.select(), not trusted to the
+        tagger.
+        """
+        import os as _os
+        import sys as _sys
+        _plugins = _os.path.join(_os.path.dirname(_os.path.dirname(
+            _os.path.abspath(__file__))), "plugins", "memory")
+        if _plugins not in _sys.path:
+            _sys.path.insert(0, _plugins)
+        from spine.rule_scope import TurnContext, select
+
+        # Session-start context: no query, no tool, no image. Only universal and
+        # [R] entries fire, which is exactly the always-loaded set.
+        hot, deferred = select(entries, TurnContext())
+        if deferred:
+            logger.info(
+                "Hot-core scope filter: %d entries deferred to prefetch, %d kept",
+                len(deferred), len(hot))
+        return hot
 
     @staticmethod
     def _sanitize_entries_for_snapshot(entries: List[str], filename: str) -> List[str]:

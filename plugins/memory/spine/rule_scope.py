@@ -160,3 +160,19 @@ def summarise(blocks: Sequence[str], ctx: TurnContext) -> Dict[str, Any]:
             for b in deferred
         }),
     }
+
+
+def deliverable(blocks: Sequence[str], ctx: TurnContext) -> List[str]:
+    """Blocks this turn needs that the frozen snapshot does not already carry.
+
+    The snapshot is built with an empty TurnContext, so it holds exactly the
+    universal and [R] blocks. Anything that fires for a real turn but is not in
+    that set has to be delivered by prefetch(), or a tagged rule would simply
+    vanish once scope filtering is on.
+
+    Returned in the file's own order so repeated turns produce a stable string.
+    """
+    always, _ = select(blocks, TurnContext())
+    always_set = set(always)
+    now, _ = select(blocks, ctx)
+    return [b for b in now if b not in always_set]

@@ -1890,6 +1890,10 @@ def init_agent(
                     user_char_limit=mem_config.get("user_char_limit", 1375),
                     memory_enabled=agent._memory_enabled,
                     user_profile_enabled=agent._user_profile_enabled,
+                    # hotcore-retrieval-split phase 4: off unless explicitly
+                    # enabled. When on, @when:-tagged entries leave the frozen
+                    # system-prompt snapshot and arrive via spine prefetch().
+                    scope_filter=bool(mem_config.get("scope_filter", False)),
                 )
                 agent._memory_store.load_from_disk()
         except Exception:
