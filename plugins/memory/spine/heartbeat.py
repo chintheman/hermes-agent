@@ -64,7 +64,25 @@ CLAUDE_MEM_DIR = os.path.expanduser("~/.claude/projects/-Users-0xsteamboat/memor
 CC_PROFILE = "agent:claude-code"
 PROPOSAL_DIR = os.path.expanduser("~/.hermes/proposals/claude-memory")
 
-HOTCORE_WARN_BYTES = 20000        # spine's own demote trigger
+# 2026-09-05: raised 20,000 -> 26,000 after measuring 44 nightly consolidation
+# reports. The file adds ~4,200 bytes/day and the nightly demote removes ~2,450,
+# so it nets about +1,800/day and settles in a 21,000-25,000 band. Against a
+# 20,000 line that meant the check was red nearly every day and the only thing
+# that ever brought it down was a human doing it by hand — the file hit 39,672
+# on 2026-08-25 and was manually cut by 15,212 the next day.
+#
+# The content is not the problem. [R] rules plus [C] corrections alone are
+# ~10,900 bytes, over half the old budget, and both are permanent and grow-only.
+# Squeezing below that band is what cost an [R] rule on 2026-09-05.
+#
+# 20,000 was never a hard limit either: nothing in the codebase rejects a write
+# at any size. It is a warn threshold, so it should fire when something is
+# genuinely wrong rather than every single day. 26,000 sits above the natural
+# band and leaves the weekly compression pass to handle real spikes.
+#
+# The durable fix is to stop loading situational corrections on every call and
+# retrieve them instead. Tracked separately as hotcore-retrieval-split.
+from spine.loops import HOTCORE_BUDGET_BYTES as HOTCORE_WARN_BYTES  # noqa: E402
 SYNC_STALE_HOURS = 12             # cron runs every 4h; 3 misses is a real fault
 CONSOLIDATE_STALE_HOURS = 48      # cron runs daily
 EVAL_REGRESSION_TOLERANCE = 0     # any drop below baseline is a regression

@@ -20,6 +20,13 @@ from .config import SpineConfig
 from .embedder import embedder_available, embed_single
 from .index import MemoryIndex, _cosine_similarity, _deserialize_vector
 
+# The hot-core size budget, defined ONCE and imported by heartbeat.py.
+# It used to be hard-coded here three times and again in heartbeat.py, so
+# raising it on 2026-09-05 left the nightly warning still quoting 20,000
+# while the heartbeat had already moved on. See heartbeat.HOTCORE_WARN_BYTES
+# for the rationale behind the number.
+HOTCORE_BUDGET_BYTES = 26000
+
 logger = logging.getLogger(__name__)
 
 
@@ -303,7 +310,7 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
     start_size = mem_size
 
     rewrite_failed = False
-    if mem_size > 20000:
+    if mem_size > HOTCORE_BUDGET_BYTES:
         # Oldest-confirmed promoted rows first. Two things were wrong here
         # before: the text was never removed from MEMORY.md (so the file only
         # ever grew), and rows were flipped back to 'active', which made them
@@ -385,7 +392,7 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
         # `unmatched` is 0. Verified live: 2026-08-18 finished at 32,481 bytes,
         # 62% over budget, and reported "demoted 2 stale entries" with no
         # warning at all. A human had to rescue the file.
-        if mem_size > 20000:
+        if mem_size > HOTCORE_BUDGET_BYTES:
             # Say so loudly. A pass that runs nightly, removes nothing, and
             # reports success is exactly how the embedder outage went unseen
             # for eight days.
@@ -397,7 +404,7 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
             else:
                 why = "there are no promoted observations left to demote"
             warning = (
-                f"MEMORY.md is {mem_size:,} bytes, over the {20000:,} budget: {why}. "
+                f"MEMORY.md is {mem_size:,} bytes, over the {HOTCORE_BUDGET_BYTES:,} budget: {why}. "
                 f"The demote pass cannot shrink the file further — run the "
                 f"LLM-assisted consolidation pass: "
                 f"`python3 consolidate.py --hotcore` (spine/hotcore_consolidate.py)."
