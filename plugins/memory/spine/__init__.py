@@ -86,6 +86,37 @@ class SpineProvider(MemoryProvider):
         """Spine contributes no static system prompt text."""
         return ""
 
+    # ------------------------------------------------------------------
+    # Per-turn context injection (MemoryProvider ABC)
+    #
+    # prefetch() is called before every API call and its return value is
+    # injected into the API copy of this turn's user message. queue_prefetch()
+    # is called after a turn completes, so the work happens off the critical
+    # path and prefetch() only reads a cached string — the contract the ABC
+    # docstring asks for and the pattern hindsight already uses.
+    #
+    # PHASE 1: deliberately returns "". The pipe is being proven before
+    # anything flows through it. Rule selection lands in phase 2.
+    # ------------------------------------------------------------------
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Return context to inject for the upcoming turn.
+
+        Must be fast: read the cache, do not recall here.
+        """
+        cache = getattr(self, "_prefetch_cache", "")
+        # One-shot: injected context is stamped into api_content and replayed on
+        # later turns, so returning the same string every turn would duplicate
+        # it rather than refresh it.
+        self._prefetch_cache = ""
+        return cache
+
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        """Prepare context for the NEXT turn, off the critical path."""
+        # Phase 1 no-op. Phase 2 fills _prefetch_cache with the subject-triggered
+        # rules selected by rule_scope.select().
+        return None
+
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         """Return the spine tool schemas."""
         from .tools import REMEMBER_SCHEMA, RECALL_SCHEMA, RECALL_AT_SCHEMA, REFLECT_SCHEMA, FORGET_SCHEMA, EXPLAIN_SCHEMA
@@ -121,35 +152,25 @@ class SpineProvider(MemoryProvider):
     # ------------------------------------------------------------------
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
-        """Inject activation manifest on first turn (spec §5.3, HANDOFF-REVIEW P1-4).
+        """Per-turn bookkeeping. Injection happens in prefetch(), not here.
 
-        Uses the MemoryProvider ABC on_turn_start hook (confirmed present).
-        Injects exactly once per session via seen-set; re-injects after reset.
+        2026-09-05: this method used to build an "activation manifest" and store
+        it on self._manifest_text, which NOTHING ever read — two writes, zero
+        reads, confirmed by grep. system_prompt_block() returns "" and this hook
+        returns None, so spine had no route to inject anything at all. Every
+        session since it shipped built that manifest and threw it away, and its
+        rule_checklist was four hard-coded rules matching none of the ten real
+        [R] rules in the hot core. Dead and wrong, so both are gone.
+
+        The ABC's actual per-turn injection path is prefetch(), which returns a
+        string. That is implemented below.
         """
-        if not hasattr(self, "_manifest_shown"):
-            self._manifest_shown = False
-
-        if not self._manifest_shown:
-            from .loops import build_activation_manifest
-            self._last_manifest = build_activation_manifest(self._config)
-            self._manifest_shown = True
-            # Inject via system prompt block for this turn
-            manifest = self._last_manifest
-            self._manifest_text = (
-                f"\n[ACTIVATION MANIFEST — session start]\n"
-                f"Profile: {manifest.get('active_profile', 'default')}\n"
-                f"Skills: {', '.join(manifest.get('relevant_skills', []))}\n"
-                f"**Cross-topic reminder:** you have cross-topic context access across this conversation.\n"
-                f"Rules: {manifest.get('rule_checklist', '')}\n"
-                f"Recent memory: {manifest.get('recalled_top_6', 'No observations yet.')}\n"
-            )
-            logger.info("Activation manifest injected (turn %d)", turn_number)
+        self._turn_number = turn_number
 
     def on_session_reset(self, **kwargs) -> None:
-        """Clear tracking state on /reset — manifest re-shown next session."""
-        self._manifest_shown = False
-        self._last_manifest = None
-        self._manifest_text = None
+        """Clear per-session caches on /reset."""
+        self._turn_number = 0
+        self._prefetch_cache = ""
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Observer pass — extract durable observations (spec §5.1)."""

@@ -717,59 +717,15 @@ def _promote_to_hotcore(obs_id: str, content: str, obs_type: str,
         return "failed"
 
 
-def build_activation_manifest(config: SpineConfig) -> Dict[str, Any]:
-    """Build the session-start activation manifest (spec §5.3).
-
-    Returns a dict with:
-    - active_profile
-    - relevant_skills
-    - cross_topic_reminder
-    - rule_checklist
-    - recalled_top_6 (if index has observations)
-    """
-    manifest: Dict[str, Any] = {
-        "active_profile": "agent:main",
-        "cross_topic_reminder": "You have cross-topic context access across this Telegram group.",
-        "rule_checklist": [
-            "[R] Verify before asserting — tool calls before claims",
-            "[R] Sweep after every fix — find all instances of the same bug",
-            "[R] Never offer options when path is clear",
-            "[R] Private stays private — never expose secrets",
-        ],
-        "recalled": [],
-    }
-
-    # Attempt recall of top-6 relevant observations
-    try:
-        from .index import MemoryIndex
-        from .embedder import embedder_available, embed_single
-
-        idx = MemoryIndex(config.db)
-        idx.open()
-        count = idx.count_active()
-
-        if count > 0:
-            # Recall observations relevant to the default profile
-            query = "user preferences communication style workflow habits"
-            query_embedding = None
-            if embedder_available():
-                try:
-                    query_embedding = embed_single(query)
-                except Exception:
-                    pass
-
-            results = idx.search_hybrid(query, query_embedding, k=6)
-            manifest["recalled"] = [
-                f"[{r['id'][:8]}] ({r['type']}, {r['epistemic']}) {r['content']}"
-                for r in results
-            ]
-            manifest["note"] = f"{count} observations available, {len(results)} recalled"
-
-        idx.close()
-    except Exception:
-        pass
-
-    return manifest
+# build_activation_manifest() removed 2026-09-05. It was orphaned — zero callers,
+# zero tests, zero doc references — because its only consumer stored the result
+# on spine's _manifest_text, which nothing ever read. Beyond being dead it was
+# wrong three ways: a hard-coded rule_checklist of four rules matching none of
+# the ten real [R] rules in the hot core; a cross_topic_reminder hard-coded to
+# "this Telegram group"; and a docstring promising relevant_skills and
+# recalled_top_6 while the body set `recalled` and `note`, so the caller's
+# lookups always fell through to defaults. Per-turn rule delivery now goes
+# through SpineProvider.prefetch(). See hotcore-retrieval-split.
 
 
 def _semantic_merge(idx: MemoryIndex, config: SpineConfig, profile: str) -> int:
