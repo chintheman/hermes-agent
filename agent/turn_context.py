@@ -228,6 +228,38 @@ def consume_gateway_turn_context_notes(agent: Any) -> str:
     return notes if isinstance(notes, str) else ""
 
 
+def query_text_for_recall(content: Any) -> str:
+    """Best-effort text for memory recall from a user message of ANY shape.
+
+    ``original_user_message`` is a plain string on most paths but a list of
+    content parts on gateway and multimodal turns. Both memory hooks below used
+    a bare ``isinstance(..., str)`` guard and fell back to ``""`` otherwise, so
+    on those turns external memory providers were never asked for context at
+    all — silently, because ``prefetch_all`` returns "" for an empty query and
+    the caller swallows exceptions.
+
+    Found 2026-09-05: a live gateway turn mentioning "market-intel ledger" got
+    no recall, while ``queue_prefetch_all`` (which is handed ``user_text``, a
+    real string) saw the full 195-character query. Same family as the bug
+    ``append_notes_to_multimodal_content`` exists to fix.
+
+    Returns "" only when there is genuinely no text to key a search on.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text)
+        return "\n".join(parts)
+    return ""
+
+
 def append_notes_to_multimodal_content(content: Any, notes: str) -> bool:
     """Deliver must-deliver notes on a multimodal (list) user message.
 
@@ -1479,7 +1511,7 @@ def build_turn_context(
     # Notify memory providers of the new turn (BEFORE prefetch_all).
     if agent._memory_manager:
         try:
-            _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
+            _turn_msg = query_text_for_recall(original_user_message)
             agent._memory_manager.on_turn_start(agent._user_turn_count, _turn_msg)
         except Exception:
             pass
@@ -1491,7 +1523,15 @@ def build_turn_context(
     ext_prefetch_cache = ""
     if agent._memory_manager:
         try:
-            _query = original_user_message if isinstance(original_user_message, str) else ""
+            _query = query_text_for_recall(original_user_message)
+            if not _query and original_user_message:
+                # Never let a recall skip be silent again. Before 2026-09-05 a
+                # non-string message dropped straight to "" here and no provider
+                # was ever asked, with nothing in the log to say so.
+                logger.warning(
+                    "Memory prefetch skipped: no text extracted from a %s user "
+                    "message — external providers got no query this turn",
+                    type(original_user_message).__name__)
             if not is_trivial_prompt(_query):
                 ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
         except Exception:

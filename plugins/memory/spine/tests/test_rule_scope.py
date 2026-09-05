@@ -327,3 +327,30 @@ def test_prefetch_is_silent_when_the_flag_is_off(monkeypatch):
     p = spine_mod.SpineProvider()
     p.initialize("t")
     assert p.prefetch("check the ledger") == ""
+
+
+# ── the gateway path: a non-string user message must still key recall ──
+
+def test_query_text_for_recall_handles_every_message_shape():
+    """A live gateway turn got no recall because original_user_message is a list
+    of content parts there, and both memory hooks guarded on isinstance(str)
+    and fell back to "". Silently: prefetch_all returns "" for an empty query
+    and the caller swallows exceptions."""
+    from agent.turn_context import query_text_for_recall as q
+
+    assert q("check the ledger") == "check the ledger"
+    assert q([{"type": "text", "text": "check the ledger"},
+              {"type": "image_url", "image_url": {}}]) == "check the ledger"
+    assert q(["a", "b"]) == "a\nb"
+    # nothing to key a search on
+    assert q(None) == ""
+    assert q([{"type": "image_url", "image_url": {}}]) == ""
+
+
+def test_multimodal_turn_still_selects_rules():
+    """End of the chain: a list-shaped message must reach rule selection."""
+    from agent.turn_context import query_text_for_recall as q
+    content = [{"type": "text", "text": "the ledger scorecard looks wrong"},
+               {"type": "image_url", "image_url": {}}]
+    hot, deferred = select(SAMPLE, TurnContext(query=q(content)))
+    assert "[W] ledger note @when:subject=ledger" in hot
