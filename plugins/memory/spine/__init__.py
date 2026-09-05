@@ -63,29 +63,38 @@ def _send_secrets_alert(target: str, text: str) -> None:
 
 
 def _scope_filter_enabled() -> bool:
-    """Read memory.scope_filter from the live Hermes config, cached.
+    """Read memory.scope_filter from the live Hermes config.
 
-    Defaults to False. Both halves of scope filtering read the same flag, so
-    they can never be half-on: snapshot filtered with nothing delivering it, or
-    context delivered on top of a snapshot that already has it.
+    Defaults to False. Both halves of scope filtering must read the same flag
+    at the same moment, or the feature is half-on: the snapshot filtered with
+    nothing delivering the rest, or context delivered on top of a snapshot that
+    already carries it.
+
+    This used to hold the value in a process-global set on the first prefetch
+    of the process's life and never re-read. Half 1 (MemoryStore in
+    tools/memory_tool.py) reads the flag afresh for every agent the gateway
+    builds, so turning the flag on against a RUNNING gateway filtered the
+    snapshot while prefetch() went on short-circuiting to "" on a stale False.
+    The deferred rules were then in no prompt at all. Measured live on
+    2026-09-05: gateway up at 11:10:57, a cron turn at 11:15:26 cached False,
+    the flag went on at 11:34:38, and the 11:34:45 turn lost all 27 deferred
+    blocks. Three separate live tests failed this way and read as "prefetch is
+    broken".
+
+    load_config_readonly() is the house loader: it caches on the config file's
+    (mtime_ns, size), so an edit invalidates it, and it resolves HERMES_HOME,
+    where the hardcoded ~/.hermes/config.yaml read the wrong file under a
+    profile. Cache-hit cost is ~130us, against ~30ms of selection work behind
+    it.
     """
-    global _SCOPE_FLAG
-    if _SCOPE_FLAG is not None:
-        return _SCOPE_FLAG
-    val = False
     try:
-        import yaml
-        cfg_path = os.path.expanduser("~/.hermes/config.yaml")
-        with open(cfg_path, encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh) or {}
-        val = bool((cfg.get("memory") or {}).get("scope_filter", False))
+        from hermes_cli.config import cfg_get, load_config_readonly
+
+        return bool(
+            cfg_get(load_config_readonly(), "memory", "scope_filter", default=False)
+        )
     except Exception:
-        val = False
-    _SCOPE_FLAG = val
-    return val
-
-
-_SCOPE_FLAG = None
+        return False
 
 
 class SpineProvider(MemoryProvider):

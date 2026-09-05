@@ -354,3 +354,51 @@ def test_multimodal_turn_still_selects_rules():
                {"type": "image_url", "image_url": {}}]
     hot, deferred = select(SAMPLE, TurnContext(query=q(content)))
     assert "[W] ledger note @when:subject=ledger" in hot
+
+
+# ── the flag itself: read per turn, never frozen for the process ──
+
+def test_flag_turned_on_mid_process_takes_effect(tmp_path, monkeypatch):
+    """The defect that made three live tests read as "prefetch is broken".
+
+    _scope_filter_enabled() used to memoise into a process-global set on the
+    first prefetch of the process's life. Half 1 (MemoryStore) re-reads the
+    flag for every agent the gateway builds, so turning the flag on against a
+    RUNNING gateway filtered the snapshot while prefetch() kept returning ""
+    from the stale False. The deferred rules were then in no prompt at all.
+    """
+    import hermes_cli.config as cfg_mod
+    import spine as spine_mod
+
+    hot = tmp_path / "MEMORY.md"
+    hot.write_text(
+        "[C] universal\n§\n[W] ledger note @when:subject=ledger",
+        encoding="utf-8")
+    monkeypatch.setattr(os.path, "expanduser",
+                        lambda p: str(hot) if p.endswith("MEMORY.md") else p)
+
+    flag = {"on": False}
+    monkeypatch.setattr(cfg_mod, "load_config_readonly",
+                        lambda: {"memory": {"scope_filter": flag["on"]}})
+
+    p = spine_mod.SpineProvider()
+    p.initialize("t")
+    assert p.prefetch("check the ledger") == "", "delivered with the flag off"
+
+    flag["on"] = True  # operator flips it on a gateway that is already up
+    assert "ledger note" in p.prefetch("check the ledger"), (
+        "prefetch froze the flag for the life of the process")
+
+
+def test_flag_defaults_off_when_config_is_unreadable(monkeypatch):
+    """Fails closed: no flag, no filtering, full hot core."""
+    import hermes_cli.config as cfg_mod
+    import spine as spine_mod
+
+    def _boom():
+        raise OSError("config unreadable")
+
+    monkeypatch.setattr(cfg_mod, "load_config_readonly", _boom)
+    assert spine_mod._scope_filter_enabled() is False
+    monkeypatch.setattr(cfg_mod, "load_config_readonly", lambda: {})
+    assert spine_mod._scope_filter_enabled() is False
