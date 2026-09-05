@@ -149,12 +149,12 @@ def _snapshot():
 
 
 def test_snapshot_holds_universal_rules_and_undeliverable_kinds():
-    # Not just universal + [R]: tool/image blocks stay too, because nothing can
-    # deliver them back yet.
+    # Not just universal + [R]: an image block stays too, because nothing can
+    # deliver it back yet. Tool blocks left on 2026-09-05 when the
+    # hotcore-rules transform_tool_result hook landed.
     assert _snapshot() == [
         "[R] constitution rule",
         "[C] universal correction",
-        "[W] garmin note @when:tool=garmin_*",
         "[C] screenshot rule @when:image",
     ]
 
@@ -257,12 +257,17 @@ from spine.rule_scope import DELIVERABLE_KINDS, snapshot_keep  # noqa: E402
 
 
 def test_undeliverable_kinds_stay_in_the_snapshot():
-    """queue_prefetch only sees the query, so tool/image blocks have no delivery
-    path. Filtering one out would delete the rule outright."""
+    """A block may only leave the snapshot if something can deliver it back.
+
+    Image blocks still have no path: pre_llm_call is unwired, and
+    compose_user_api_content drops the memory block on list-shaped content
+    anyway. Filtering one out would delete the rule outright.
+    """
     keep = snapshot_keep(SAMPLE)
-    assert "[W] garmin note @when:tool=garmin_*" in keep
     assert "[C] screenshot rule @when:image" in keep
-    assert "[W] ledger note @when:subject=ledger" not in keep  # subject IS deliverable
+    # Both of these have a delivery path now.
+    assert "[W] ledger note @when:subject=ledger" not in keep   # prefetch()
+    assert "[W] garmin note @when:tool=garmin_*" not in keep    # hotcore-rules hook
 
 
 def test_only_deliverable_kinds_are_ever_deferred():

@@ -1,0 +1,6 @@
+name: hotcore-rules
+version: "0.1.0"
+description: "Deliver tool-scoped hot-core rules at the moment their tool runs. MEMORY.md blocks tagged @when:tool=<glob> leave the always-loaded system prompt and arrive appended to that tool's result instead, so a rule about Garmin is paid for on Garmin calls and nowhere else. Inert unless memory.scope_filter is on."
+author: "0xsteamboat"
+hooks:
+  - transform_tool_result

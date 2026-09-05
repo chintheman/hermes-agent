@@ -54,9 +54,13 @@ VALID_KINDS = {UNIVERSAL, SUBJECT, TOOL, IMAGE}
 # design exists to prevent. Caught on 2026-09-05 by an end-to-end check, after
 # the code had already been written to defer all three.
 #
-# Adding TOOL needs a transform_tool_result hook; IMAGE needs pre_llm_call,
-# which sees the outgoing payload. Move a kind in here only once its hook lands.
-DELIVERABLE_KINDS = {SUBJECT}
+# TOOL landed 2026-09-05: the hotcore-rules plugin registers a
+# transform_tool_result hook that appends a tool's rules to that tool's result.
+# IMAGE still needs pre_llm_call, and is additionally blocked by
+# compose_user_api_content returning None for list-shaped content — on an image
+# turn the memory block is dropped entirely, which is exactly the turn the
+# screenshot rule needs. Move a kind in here only once its hook lands.
+DELIVERABLE_KINDS = {SUBJECT, TOOL}
 
 
 @dataclass(frozen=True)
