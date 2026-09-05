@@ -44,6 +44,20 @@ IMAGE = "image"
 
 VALID_KINDS = {UNIVERSAL, SUBJECT, TOOL, IMAGE}
 
+# Trigger kinds that something can actually DELIVER once they are filtered out
+# of the frozen snapshot.
+#
+# prefetch()/queue_prefetch() receive only the user's query — no tool name, no
+# attachment info — so today only SUBJECT can be delivered. Deferring a TOOL or
+# IMAGE block would remove it from the snapshot with nothing able to bring it
+# back: the rule would be silently deleted, which is the one outcome this whole
+# design exists to prevent. Caught on 2026-09-05 by an end-to-end check, after
+# the code had already been written to defer all three.
+#
+# Adding TOOL needs a transform_tool_result hook; IMAGE needs pre_llm_call,
+# which sees the outgoing payload. Move a kind in here only once its hook lands.
+DELIVERABLE_KINDS = {SUBJECT}
+
 
 @dataclass(frozen=True)
 class Trigger:
@@ -172,7 +186,23 @@ def deliverable(blocks: Sequence[str], ctx: TurnContext) -> List[str]:
 
     Returned in the file's own order so repeated turns produce a stable string.
     """
-    always, _ = select(blocks, TurnContext())
-    always_set = set(always)
+    always_set = set(snapshot_keep(blocks))
     now, _ = select(blocks, ctx)
     return [b for b in now if b not in always_set]
+
+
+def snapshot_keep(blocks: Sequence[str]) -> List[str]:
+    """Entries the frozen system-prompt snapshot must carry.
+
+    Universal entries and [R] rules always. PLUS any block whose trigger kind
+    has no delivery path yet — filtering one of those out would delete a rule.
+    """
+    keep: List[str] = []
+    for b in blocks:
+        if is_rule_block(b):
+            keep.append(b)
+            continue
+        trig = parse_trigger(b)
+        if trig.is_universal() or trig.kind not in DELIVERABLE_KINDS:
+            keep.append(b)
+    return keep

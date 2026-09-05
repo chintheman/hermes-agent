@@ -392,11 +392,13 @@ class MemoryStore:
             _os.path.abspath(__file__))), "plugins", "memory")
         if _plugins not in _sys.path:
             _sys.path.insert(0, _plugins)
-        from spine.rule_scope import TurnContext, select
+        from spine.rule_scope import snapshot_keep
 
-        # Session-start context: no query, no tool, no image. Only universal and
-        # [R] entries fire, which is exactly the always-loaded set.
-        hot, deferred = select(entries, TurnContext())
+        # snapshot_keep(), not an empty-context select(): a block may only leave
+        # the snapshot if something can deliver it back. Universal entries, [R]
+        # rules, and any trigger kind without a delivery path all stay.
+        hot = snapshot_keep(entries)
+        deferred = [e for e in entries if e not in hot]
         if deferred:
             logger.info(
                 "Hot-core scope filter: %d entries deferred to prefetch, %d kept",

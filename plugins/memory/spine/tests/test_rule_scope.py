@@ -143,13 +143,20 @@ SAMPLE = [
 
 
 def _snapshot():
-    """What the frozen system-prompt snapshot holds: empty-context selection."""
-    hot, _ = select(SAMPLE, TurnContext())
-    return hot
+    """What the frozen system-prompt snapshot holds — must mirror the store."""
+    from spine.rule_scope import snapshot_keep
+    return snapshot_keep(SAMPLE)
 
 
-def test_snapshot_is_exactly_universal_and_rules():
-    assert _snapshot() == ["[R] constitution rule", "[C] universal correction"]
+def test_snapshot_holds_universal_rules_and_undeliverable_kinds():
+    # Not just universal + [R]: tool/image blocks stay too, because nothing can
+    # deliver them back yet.
+    assert _snapshot() == [
+        "[R] constitution rule",
+        "[C] universal correction",
+        "[W] garmin note @when:tool=garmin_*",
+        "[C] screenshot rule @when:image",
+    ]
 
 
 def test_delivery_never_duplicates_the_snapshot():
@@ -197,7 +204,7 @@ def test_scope_filter_never_shrinks_what_gets_persisted(tmp_path, monkeypatch):
     blocks = [
         "[R] constitution rule",
         "[C] universal correction",
-        "[W] garmin note @when:tool=garmin_*",
+        "[W] ledger note @when:subject=ledger",
         "[C] screenshot rule @when:image",
     ]
     (mem_dir / "MEMORY.md").write_text("\n§\n".join(blocks), encoding="utf-8")
@@ -211,8 +218,8 @@ def test_scope_filter_never_shrinks_what_gets_persisted(tmp_path, monkeypatch):
 
     # The snapshot IS filtered ...
     snap = store._system_prompt_snapshot["memory"]
-    assert "@when:" not in snap
-    assert "garmin note" not in snap
+    assert "ledger note" not in snap        # subject: deferred
+    assert "screenshot rule" in snap        # image: no delivery path, stays
 
     # ... but live state is whole, and so is anything persisted from it.
     assert len(store.memory_entries) == len(blocks)
@@ -229,7 +236,7 @@ def test_scope_filter_off_is_byte_identical_to_unfiltered(tmp_path, monkeypatch)
     mem_dir = tmp_path / "memories"
     mem_dir.mkdir()
     (mem_dir / "MEMORY.md").write_text(
-        "[C] plain\n§\n[W] tagged @when:image", encoding="utf-8")
+        "[C] plain\n§\n[W] tagged @when:subject=ledger", encoding="utf-8")
     (mem_dir / "USER.md").write_text("", encoding="utf-8")
     monkeypatch.setattr(mt, "get_memory_dir", lambda: mem_dir)
 
@@ -242,3 +249,35 @@ def test_scope_filter_off_is_byte_identical_to_unfiltered(tmp_path, monkeypatch)
 
     assert "tagged" in build(False)
     assert "tagged" not in build(True)
+
+
+# ── a block may only leave the snapshot if something can deliver it back ──
+
+from spine.rule_scope import DELIVERABLE_KINDS, snapshot_keep  # noqa: E402
+
+
+def test_undeliverable_kinds_stay_in_the_snapshot():
+    """queue_prefetch only sees the query, so tool/image blocks have no delivery
+    path. Filtering one out would delete the rule outright."""
+    keep = snapshot_keep(SAMPLE)
+    assert "[W] garmin note @when:tool=garmin_*" in keep
+    assert "[C] screenshot rule @when:image" in keep
+    assert "[W] ledger note @when:subject=ledger" not in keep  # subject IS deliverable
+
+
+def test_only_deliverable_kinds_are_ever_deferred():
+    from spine.rule_scope import parse_trigger
+    deferred = [b for b in SAMPLE if b not in snapshot_keep(SAMPLE)]
+    for b in deferred:
+        assert parse_trigger(b).kind in DELIVERABLE_KINDS
+
+
+def test_nothing_lost_including_undeliverable_kinds():
+    for ctx in [TurnContext(),
+                TurnContext(query="ledger check"),
+                TurnContext(query="x", has_image=True),
+                TurnContext(tool_name="garmin_get_activities"),
+                TurnContext(query="ledger", tool_name="garmin_x", has_image=True)]:
+        should_fire, _ = select(SAMPLE, ctx)
+        reachable = set(snapshot_keep(SAMPLE)) | set(deliverable(SAMPLE, ctx))
+        assert not (set(should_fire) - reachable), f"lost a rule for {ctx}"
