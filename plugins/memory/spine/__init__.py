@@ -129,23 +129,37 @@ class SpineProvider(MemoryProvider):
     # ------------------------------------------------------------------
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """Return context to inject for the upcoming turn.
+        """Rules this turn needs that the frozen snapshot does not already hold.
 
-        Must be fast: read the cache, do not recall here.
+        Computed inline from THIS turn's query, deliberately not from a cache.
+
+        Two ordering bugs live here if you cache. queue_prefetch() runs AFTER a
+        turn to prepare the NEXT one, so the first turn of a session has nothing
+        cached — and a one-shot run (cron, hermes-run, most headless work) is
+        always a first turn. Observed live on 2026-09-05: the snapshot dropped 27
+        blocks and prefetch delivered none of them. Then on turn 2+ a cache holds
+        the selection for the PREVIOUS query, so it would deliver rules for the
+        topic before last.
+
+        Inline is safe here in a way it would not be for the ABC's usual case.
+        Selection is pure string matching over a ~24KB file — no network, no
+        embedding, no model call, ~30ms. The "be fast, use the cache" guidance
+        exists to keep recall off the critical path, not to forbid that.
         """
-        cache = getattr(self, "_prefetch_cache", "")
-        # One-shot: injected context is stamped into api_content and replayed on
-        # later turns, so returning the same string every turn would duplicate
-        # it rather than refresh it.
-        self._prefetch_cache = ""
-        return cache
+        try:
+            if not _scope_filter_enabled():
+                return ""
+            return self._build_scoped_context(query)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rule_scope prefetch failed (non-fatal): %s", exc)
+            return ""
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Prepare context for the NEXT turn, off the critical path.
 
         SHADOW MODE: computes the selection and logs what it WOULD have
-        deferred, but leaves _prefetch_cache empty so nothing changes. Per the
-        standing rule that a new system shadows the old one before taking over.
+        deferred. Delivery itself lives in prefetch(), which computes from the
+        current turn's query.
 
         The log only says something once blocks carry @when: markers — until
         then every block is universal and deferred is 0 by design, which is
@@ -156,16 +170,8 @@ class SpineProvider(MemoryProvider):
         except Exception as exc:  # never let shadow logging break a turn
             logger.debug("rule_scope shadow failed (non-fatal): %s", exc)
 
-        # Deliver the other half of scope filtering. When memory.scope_filter is
-        # on, the frozen snapshot carries only universal and [R] entries, so a
-        # tagged rule reaches the model ONLY through here. When it is off the
-        # snapshot already has everything and injecting would duplicate, so this
-        # stays silent. The two halves are gated by the same config flag.
-        try:
-            if _scope_filter_enabled():
-                self._prefetch_cache = self._build_scoped_context(query)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("rule_scope delivery failed (non-fatal): %s", exc)
+        # Deliberately does NOT prime a cache for prefetch(): the selection
+        # depends on the NEXT turn's query, which is not knowable here.
         return None
 
     def _build_scoped_context(self, query: str, tool_name: str = "",
@@ -263,7 +269,6 @@ class SpineProvider(MemoryProvider):
     def on_session_reset(self, **kwargs) -> None:
         """Clear per-session caches on /reset."""
         self._turn_number = 0
-        self._prefetch_cache = ""
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Observer pass — extract durable observations (spec §5.1)."""

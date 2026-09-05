@@ -281,3 +281,49 @@ def test_nothing_lost_including_undeliverable_kinds():
         should_fire, _ = select(SAMPLE, ctx)
         reachable = set(snapshot_keep(SAMPLE)) | set(deliverable(SAMPLE, ctx))
         assert not (set(should_fire) - reachable), f"lost a rule for {ctx}"
+
+
+# ── prefetch ordering: the two bugs that only showed up live ──
+
+def test_prefetch_uses_the_current_query_not_a_cache(tmp_path, monkeypatch):
+    """Two ordering bugs, both found on 2026-09-05 against the live gateway.
+
+    queue_prefetch() runs AFTER a turn to prepare the next, so the first turn of
+    a session has nothing cached — and one-shot runs (cron, hermes-run) are
+    always a first turn, which silently lost every deferred rule. Caching also
+    means turn 2 delivers the selection for turn 1's query.
+    """
+    import spine as spine_mod
+
+    hot = tmp_path / "MEMORY.md"
+    hot.write_text(
+        "[C] universal\n§\n"
+        "[W] ledger note @when:subject=ledger\n§\n"
+        "[W] hip note @when:subject=hip",
+        encoding="utf-8")
+    monkeypatch.setattr(os.path, "expanduser",
+                        lambda p: str(hot) if p.endswith("MEMORY.md") else p)
+    monkeypatch.setattr(spine_mod, "_scope_filter_enabled", lambda: True)
+
+    p = spine_mod.SpineProvider()
+    p.initialize("t")
+
+    # First turn, cold: must still deliver.
+    first = p.prefetch("check the ledger")
+    assert "ledger note" in first, "first turn of a session delivered nothing"
+
+    # Next turn on a different subject must NOT replay the previous selection.
+    second = p.prefetch("my hip hurts")
+    assert "hip note" in second
+    assert "ledger note" not in second, "delivered the previous turn's rules"
+
+    # A turn matching nothing delivers nothing.
+    assert p.prefetch("unrelated chatter") == ""
+
+
+def test_prefetch_is_silent_when_the_flag_is_off(monkeypatch):
+    import spine as spine_mod
+    monkeypatch.setattr(spine_mod, "_scope_filter_enabled", lambda: False)
+    p = spine_mod.SpineProvider()
+    p.initialize("t")
+    assert p.prefetch("check the ledger") == ""
