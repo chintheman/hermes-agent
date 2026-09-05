@@ -605,6 +605,53 @@ def check_hotcore_rules(cfg):
     return OK, f"{current} [R] rules, none lost"
 
 
+def check_hotcore_triggers(cfg):
+    """Every @when: marker in the hot core must be one fires() can satisfy.
+
+    A block tagged with a kind rule_scope does not understand falls back to
+    universal, so it still reaches the model — safe, but silently not doing what
+    whoever wrote the tag intended. "@when:tool" with no glob, or
+    "@when:planetry=mars", would sit there looking scoped and never scope
+    anything. That is invisible from the outside, which is exactly the class of
+    fault this file exists for.
+
+    Added 2026-09-05 with hotcore-retrieval-split phase 2.
+    """
+    if not os.path.exists(HOTCORE_PATH):
+        return SKIP, "no MEMORY.md on disk"
+    try:
+        from spine.rule_scope import (
+            WHEN_RE, SUBJECT, TOOL, VALID_KINDS, split_blocks, parse_trigger,
+        )
+    except Exception as e:  # noqa: BLE001
+        return SKIP, f"rule_scope unavailable ({type(e).__name__})"
+
+    with open(HOTCORE_PATH, encoding="utf-8", errors="ignore") as fh:
+        blocks = split_blocks(fh.read())
+
+    problems = []
+    tagged = 0
+    for b in blocks:
+        m = WHEN_RE.search(b)
+        if not m:
+            continue
+        tagged += 1
+        kind = (m.group(1) or "").lower()
+        head = b.lstrip()[:60].replace("\n", " ")
+        if kind not in VALID_KINDS:
+            problems.append(f"unknown trigger '{kind}' — treated as universal: {head}")
+            continue
+        if kind in (SUBJECT, TOOL) and not parse_trigger(b).values:
+            problems.append(f"'{kind}' with no match terms — can never scope: {head}")
+
+    if problems:
+        return FAIL, "; ".join(problems[:3]) + (
+            f" (+{len(problems) - 3} more)" if len(problems) > 3 else "")
+    if tagged == 0:
+        return OK, f"no @when: markers yet, all {len(blocks)} blocks universal"
+    return OK, f"{tagged} tagged block(s), all triggers reachable"
+
+
 CHECKS = [
     ("embedder", check_embedder),
     ("vectors", check_vectors),
@@ -613,6 +660,7 @@ CHECKS = [
     ("wiki_index", check_wiki_index),
     ("hotcore", check_hotcore),
     ("hotcore_rules", check_hotcore_rules),
+    ("hotcore_triggers", check_hotcore_triggers),
     ("hotcore_coverage", check_hotcore_coverage),
     ("sync", check_sync),
     ("divergence", check_divergence),

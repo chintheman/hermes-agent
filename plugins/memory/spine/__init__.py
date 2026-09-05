@@ -10,7 +10,10 @@ Spec: memory-system-v2.1.0-spec.md
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import time
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
@@ -112,10 +115,45 @@ class SpineProvider(MemoryProvider):
         return cache
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        """Prepare context for the NEXT turn, off the critical path."""
-        # Phase 1 no-op. Phase 2 fills _prefetch_cache with the subject-triggered
-        # rules selected by rule_scope.select().
+        """Prepare context for the NEXT turn, off the critical path.
+
+        SHADOW MODE: computes the selection and logs what it WOULD have
+        deferred, but leaves _prefetch_cache empty so nothing changes. Per the
+        standing rule that a new system shadows the old one before taking over.
+
+        The log only says something once blocks carry @when: markers — until
+        then every block is universal and deferred is 0 by design, which is
+        itself the fail-safe worth confirming in production.
+        """
+        try:
+            self._shadow_record(query)
+        except Exception as exc:  # never let shadow logging break a turn
+            logger.debug("rule_scope shadow failed (non-fatal): %s", exc)
         return None
+
+    # Shadow-mode instrumentation ---------------------------------------
+
+    SHADOW_LOG = os.path.expanduser("~/.hermes/state/rule-scope-shadow.jsonl")
+
+    def _shadow_record(self, query: str, tool_name: str = "",
+                       has_image: bool = False) -> None:
+        """Append one line describing what scoping would have done this turn."""
+        from .rule_scope import TurnContext, split_blocks, summarise
+
+        hotcore = os.path.expanduser("~/.hermes/memories/MEMORY.md")
+        if not os.path.exists(hotcore):
+            return
+        with open(hotcore, encoding="utf-8", errors="ignore") as fh:
+            blocks = split_blocks(fh.read())
+
+        rec = summarise(blocks, TurnContext(query=query or "",
+                                            tool_name=tool_name,
+                                            has_image=has_image))
+        rec["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        rec["session"] = getattr(self, "_session_id", "")
+        os.makedirs(os.path.dirname(self.SHADOW_LOG), exist_ok=True)
+        with open(self.SHADOW_LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         """Return the spine tool schemas."""
