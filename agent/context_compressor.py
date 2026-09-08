@@ -1147,7 +1147,58 @@ _ANCHOR_PATTERNS: "list[tuple[str, re.Pattern[str], int]]" = [
     ("PRs/issues", re.compile(r"#\d{3,6}\b"), 120),
     ("commits", re.compile(r"\b[0-9a-f]{9,40}\b"), 40),
     ("branches", re.compile(r"\b(?:fix|feat|docs|refactor|chore|salvage|ent)/[A-Za-z0-9._/-]{3,60}"), 40),
-    ("files", re.compile(r"\b[\w./-]+/[\w.-]+\.(?:py|ts|tsx|js|rs|md|yaml|yml|json|toml|sh)\b"), 80),
+    # Two fixes over the original `\b[\w./-]+/[\w.-]+\.(?:...)\b`:
+    #
+    # 1. It backtracked quadratically. `[\w./-]+` could split an unbroken run of
+    #    path characters at every position, so a long run with no matching
+    #    extension (a minified bundle, a base64 data URI, a long path list) cost
+    #    O(n^2): 3 KB 0.11s, 6 KB 0.40s, 12 KB 1.61s, 24 KB 7.17s, 96 KB 70s.
+    #    This runs on every compaction, so such a run stalled compaction.
+    #    Bounding each segment and the segment count removes the blowup.
+    # 2. `\b` cannot match before a leading `/`, so every ABSOLUTE path was
+    #    recorded with its leading slash stripped: /Users/x/cli.py became
+    #    Users/x/cli.py. Measured across 22 compact boundaries, 577 of 2,010
+    #    recovered file identifiers (28.7%) were mangled this way, and the
+    #    Anchor Index tells the model to use them verbatim.
+    #    `(?<![\w./~-])` replaces `\b` and admits a leading `/` or `~`, so
+    #    `~/.hermes/config.yaml` survives whole instead of arriving as
+    #    `hermes/config.yaml`.
+    #
+    # Measured across all 76 local Claude Code transcripts (164 MB of decoded
+    # message content): 4,657 unique paths before, 4,839 after. Of 2,548
+    # apparent losses, 2,450 are the new pattern matching a LONGER, more correct
+    # path containing the old truncated one, and 90 are http(s) URLs the `urls`
+    # pattern covers. That leaves 8 genuine losses, 100 occurrences, and 85 of
+    # those are `skill://figma/...SKILL.md`. Note `urls` is `https?://` only, so
+    # it does NOT cover `skill://`: that fragment is uncompensated. Low value,
+    # since the old pattern only ever caught a mangled piece of it, but it is a
+    # real loss and not covered elsewhere.
+    #
+    # Three inputs now yield NO match where the old pattern produced a mangled
+    # one: paths deeper than 12 segments, any segment over 96 chars, and any
+    # path containing `//`. Combined real-world cost is 11 occurrences. No match
+    # is the right failure here: a truncated prefix presented as a complete path
+    # would be worse than silence, and the bounds never produce one.
+    #
+    # Timings are machine-dependent; the shape is what matters. The old pattern
+    # was quadratic in the length of an unbroken path-character run, measured
+    # between 1.2s and 6.9s at 24 KB depending on the run's composition. The new
+    # one is flat: under 0.001s at 24 KB and about 0.02s at 400 KB. The
+    # lookbehind is what removes it, since inside an unbroken run there are no
+    # legal start positions and the O(n^2) restart becomes structurally
+    # impossible.
+    # `(?!\.{3,})` rejects a truncation ellipsis gluing itself onto a path.
+    # Without it, transcript text like `.../spine/rebuild-index.py` was captured
+    # whole (25 unique, 122 occurrences) and fed to a model told to use these
+    # verbatim. Fixed-length lookahead, so it adds no backtracking. `./` and
+    # `../` are still legitimate relative paths and still match.
+    #
+    # Cost, stated plainly: those 122 now yield NO match at all, where the old
+    # pattern returned the clean tail (`spine/rebuild-index.py`). Recovering the
+    # tail would mean letting a match begin mid-path, and the lookbehind that
+    # forbids exactly that is what removes the quadratic blowup. Silence is the
+    # right trade; a wrong path presented as exact is worse than no path.
+    ("files", re.compile(r"(?<![\w./~-])(?!\.{3,})[~/]?(?:[\w.~-]{1,96}/){1,12}[\w.~-]{1,96}\.(?:py|ts|tsx|js|rs|md|yaml|yml|json|toml|sh)\b"), 80),
     ("errors", re.compile(r"\b(?:[A-Z][a-zA-Z]*Error|Exception|ENOSPC|EACCES|SIGKILL|Traceback)\b[^\n]{0,90}"), 40),
     ("handles", re.compile(r"@[A-Za-z0-9-]{3,30}\b"), 40),
     ("urls", re.compile(r"https?://[^\s)\"']{10,110}"), 30),
