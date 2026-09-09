@@ -376,6 +376,10 @@ def test_coding_prompt_orders_shared_context_before_workspace(monkeypatch):
     agent = _make_agent(
         valid_tool_names=["read_file"],
         _parallel_tool_call_guidance=False,
+        # Fork carries the ADHD guidance block; this test asserts exact stable-part
+        # ordering of an upstream coding-prompt layout, so disable it on the stub
+        # (the block's own injection is covered by guidance-specific tests).
+        _adhd_output_rules=False,
     )
     monkeypatch.setattr(system_prompt, "DEFAULT_AGENT_IDENTITY", "IDENTITY")
     monkeypatch.setattr(system_prompt, "HERMES_AGENT_HELP_GUIDANCE", "HELP")

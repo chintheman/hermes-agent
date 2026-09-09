@@ -187,9 +187,11 @@ _SNAPSHOTS: tuple[tuple[str, Optional[str], str, dict], ...] = (
     }),
     # deepseek-chat / deepseek-reasoner are deprecated aliases of
     # deepseek-v4-flash's non-thinking / thinking modes — same rates.
-    ("deepseek", "https://api-docs.deepseek.com/quick_start/pricing", "deepseek-pricing-2026-07", {
-        ("deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash"): ("0.14", "0.28", "0.0028"),
-        "deepseek-v4-pro": ("0.435", "0.87", "0.003625"),
+    # 2026-08-20 snapshot (verified live): DeepSeek repriced off-peak rates
+    # upward; peak = 2x off-peak. Conservative off-peak baseline stored.
+    ("deepseek", "https://api-docs.deepseek.com/quick_start/pricing", "deepseek-pricing-2026-08", {
+        ("deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash"): ("0.22", "0.66", "0.007"),
+        "deepseek-v4-pro": ("0.66", "1.98", "0.022"),
     }),
     ("google", "https://ai.google.dev/gemini-api/docs/pricing", "google-pricing-2026-09-02", {
         ("gemini-3.8-flash", "gemini-3.7-flash"): ("0.75", "3.75", "0.075"),
