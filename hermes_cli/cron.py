@@ -579,13 +579,16 @@ def cron_create(args):
     # wins if both happen to be set.
     prompt_flag = getattr(args, "prompt_flag", None)
     prompt = prompt_flag if prompt_flag is not None else getattr(args, "prompt_positional", None)
+    # name, deliver and repeat are NOT listed here. They are in _JOB_ARG_FIELDS
+    # and arrive via **_job_api_kwargs(args) below. Passing them explicitly as
+    # well raised "got multiple values for keyword argument 'name'" on every
+    # single `hermes cron create`, which is what the v0.21.1 upstream merge
+    # shipped: it refactored cron_edit onto the shared kwargs correctly and
+    # left cron_create passing three of them twice.
     result = _cron_api(
         action="create",
         schedule=args.schedule,
         prompt=prompt,
-        name=getattr(args, "name", None),
-        deliver=getattr(args, "deliver", None),
-        repeat=getattr(args, "repeat", None),
         skill=getattr(args, "skill", None),
         skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
         no_agent=getattr(args, "no_agent", False) or None,
