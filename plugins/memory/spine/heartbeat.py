@@ -652,8 +652,112 @@ def check_hotcore_triggers(cfg):
     return OK, f"{tagged} tagged block(s), all triggers reachable"
 
 
+MCP_CONFIG = os.path.expanduser("~/.claude.json")
+MCP_SERVER_NAME = "spine-memory"
+MCP_INIT_TIMEOUT = 20             # Claude Code allows 30; fail before it does
+MCP_EXPECTED_TOOLS = 6            # memory_recall/remember/recall_at/reflect/forget/explain
+
+
+def check_mcp_server(cfg):
+    """spine-memory must complete an MCP handshake and still expose its tools.
+
+    2026-08-28 to 09-09: this server was dead for twelve days and nobody knew.
+    hermes-agent's venv moved to mcp 2.0.0 (pinned for CVE-2026-48710), which
+    removed `mcp.server.fastmcp`; spine-mcp borrows that venv because it imports
+    this plugin from this checkout, so the bump killed it at import. Thirteen
+    Claude Code sessions ran with no spine memory, and the only signal was a
+    greyed-out server name. Every other MCP server survived because each has its
+    own pinned venv. spine-mcp cannot -- it needs this one -- so a watcher is the
+    fix instead of isolation.
+
+    Only the handshake and the tool list are checked. Calling a tool would load
+    torch and MiniLM, which `embedder` already covers, and would make this check
+    depend on model state rather than on the server being alive.
+    """
+    import json as _json
+    import subprocess
+    import threading
+
+    try:
+        with open(MCP_CONFIG) as fh:
+            spec = (_json.load(fh).get("mcpServers") or {}).get(MCP_SERVER_NAME)
+    except (OSError, ValueError) as exc:
+        # Blind is not broken: Claude Code's config is not ours to depend on.
+        return SKIP, f"cannot read {MCP_CONFIG} ({type(exc).__name__}) — nothing to check"
+
+    if not spec or not spec.get("command"):
+        return SKIP, f"no local `{MCP_SERVER_NAME}` server configured for Claude Code"
+    if not os.path.exists(spec["command"]):
+        return FAIL, f"interpreter missing: {spec['command']}"
+
+    argv = [spec["command"]] + list(spec.get("args") or [])
+    env = dict(os.environ)
+    env.update(spec.get("env") or {})
+
+    try:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, bufsize=1, env=env,
+        )
+    except OSError as exc:
+        return FAIL, f"cannot start the server: {exc}"
+
+    def send(payload):
+        try:
+            proc.stdin.write(_json.dumps(payload) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass  # it died; stderr below says why
+
+    def read_line(timeout):
+        box = {}
+        t = threading.Thread(target=lambda: box.update(line=proc.stdout.readline()), daemon=True)
+        t.start()
+        t.join(timeout)
+        return box.get("line")
+
+    try:
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2026-07-28", "capabilities": {},
+                         "clientInfo": {"name": "spine-heartbeat", "version": "1"}}})
+        init = read_line(MCP_INIT_TIMEOUT)
+        if not init:
+            err = (proc.stderr.read() or "").strip().splitlines()
+            last = err[-1] if err else f"no initialize response within {MCP_INIT_TIMEOUT}s"
+            return FAIL, f"server does not answer — Claude Code has no spine memory ({last})"
+
+        try:
+            payload = _json.loads(init)
+        except ValueError:
+            return FAIL, f"non-JSON on stdout, which corrupts the protocol: {init.strip()[:80]}"
+        if "result" not in payload:
+            return FAIL, f"initialize rejected: {_json.dumps(payload.get('error'))[:80]}"
+
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        listed = read_line(MCP_INIT_TIMEOUT)
+        if not listed:
+            return FAIL, "handshake ok but tools/list never answered"
+        try:
+            tools = _json.loads(listed)["result"]["tools"]
+        except (ValueError, KeyError, TypeError):
+            return FAIL, f"tools/list returned nothing usable: {listed.strip()[:80]}"
+
+        if len(tools) < MCP_EXPECTED_TOOLS:
+            names = ", ".join(sorted(t.get("name", "?") for t in tools)) or "none"
+            return FAIL, (f"only {len(tools)} of {MCP_EXPECTED_TOOLS} tools exposed ({names}) — "
+                          f"a decorator or an import is broken")
+        return OK, f"handshake ok, {len(tools)} tools exposed"
+    finally:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001 - teardown must never mask the verdict
+            pass
+
+
 CHECKS = [
     ("embedder", check_embedder),
+    ("mcp_server", check_mcp_server),
     ("vectors", check_vectors),
     ("vector_width", check_vector_width),
     ("fts_index", check_fts_index),
