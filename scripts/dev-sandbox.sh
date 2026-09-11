@@ -220,22 +220,60 @@ fi
 mkdir -p "$SANDBOX_ROOT"/{root,home,etc}
 UPSTREAM_REPO=""
 UPSTREAM_COMMIT=""
+# Fetch REF from the upstream repo and print the commit it resolves to.
+#
+# A burst of parallel legs (this repo's install/update E2E matrices) fetches
+# the same public upstream concurrently from shared runner egress, and GitHub
+# rate-limits anonymous fetches with HTTP 429. That is transient, so retry it
+# with backoff; deterministic failures (a ref the server does not have, a DNS
+# miss) give up immediately so a bad ref still fails fast.
+#
+# A raw SHA is usually refused by the server on a direct fetch, so on failure
+# fall back to fetching main and resolving REF locally -- which works for any
+# commit that is an ancestor of main, the interesting "update from N versions
+# ago" case.
+#
+# Peel to ^{commit} in both paths: an annotated tag fetches as a tag OBJECT,
+# and using it directly fails later with "trying to write non-commit object
+# ... to branch 'refs/heads/main'".
+resolve_upstream_ref() { # $1=ref; prints commit sha on success
+  local ref="$1" attempt output commit
+  local transient_re='429|rate.?limit|unable to access|Could not read from remote|Operation timed out'
+  for attempt in 1 2 3 4; do
+    if output="$(git -C "$UPSTREAM_REPO" fetch -q "$UPSTREAM_URL" "$ref" 2>&1)"; then
+      if commit="$(git -C "$UPSTREAM_REPO" rev-parse -q --verify "FETCH_HEAD^{commit}" 2>/dev/null)"; then
+        printf '%s\n' "$commit"
+        return 0
+      fi
+    fi
+    if ! printf '%s' "$output" | grep -Eqi "$transient_re"; then
+      break  # deterministic failure: missing ref or the like -- do not retry
+    fi
+    if [ "$attempt" -lt 4 ]; then
+      sleep "$((attempt * 5))"  # 5/10/15s backoff across the rate-limit window
+    fi
+  done
+  for attempt in 1 2 3 4; do
+    if output="$(git -C "$UPSTREAM_REPO" fetch -q "$UPSTREAM_URL" refs/heads/main 2>&1)"; then
+      if commit="$(git -C "$UPSTREAM_REPO" rev-parse -q --verify "$ref^{commit}" 2>/dev/null)"; then
+        printf '%s\n' "$commit"
+        return 0
+      fi
+      break  # main fetched but REF is not an ancestor of it: deterministic miss
+    fi
+    if ! printf '%s' "$output" | grep -Eqi "$transient_re"; then
+      break
+    fi
+    [ "$attempt" -lt 4 ] && sleep "$((attempt * 5))"
+  done
+  return 1
+}
+
 if [ -n "$INSTALL_REF" ]; then
   echo "[sandbox] fetching upstream $INSTALL_REF for installer/update test" >&2
   UPSTREAM_REPO="$(mktemp -d -t hermes-sandbox-upstream.XXXXXX)"
   git -C "$UPSTREAM_REPO" init -q
-  # Fetch the ref as given. A branch or tag name resolves on its own; a raw SHA
-  # needs the remote to allow fetching it directly, so fall back to fetching
-  # main and resolving the SHA locally (which works for any commit that is an
-  # ancestor of main -- the interesting case for "update from N versions ago").
-  #
-  # Peel to ^{commit} in both cases: an annotated tag fetches as a tag OBJECT,
-  # and using it directly fails later with "trying to write non-commit object
-  # ... to branch 'refs/heads/main'".
-  if git -C "$UPSTREAM_REPO" fetch -q "$UPSTREAM_URL" "$INSTALL_REF" 2>/dev/null; then
-    UPSTREAM_COMMIT="$(git -C "$UPSTREAM_REPO" rev-parse "FETCH_HEAD^{commit}")"
-  elif git -C "$UPSTREAM_REPO" fetch -q "$UPSTREAM_URL" refs/heads/main \
-    && UPSTREAM_COMMIT="$(git -C "$UPSTREAM_REPO" rev-parse --verify -q "$INSTALL_REF^{commit}")"; then
+  if UPSTREAM_COMMIT="$(resolve_upstream_ref "$INSTALL_REF")"; then
     :
   else
     rm -rf -- "$UPSTREAM_REPO"

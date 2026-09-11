@@ -25,7 +25,21 @@ from .index import MemoryIndex, _cosine_similarity, _deserialize_vector
 # raising it on 2026-09-05 left the nightly warning still quoting 20,000
 # while the heartbeat had already moved on. See heartbeat.HOTCORE_WARN_BYTES
 # for the rationale behind the number.
-HOTCORE_BUDGET_BYTES = 26000
+#
+# 2026-09-11: raised 26,000 -> 30,000 (user decision: "raise the cap and
+# prune"). 26,000 was set against a 21,000-25,000 settling band; the file had
+# drifted to 27,855 and the beat went red on Sep 8, 9, 10 and 11 with no
+# automated remedy left — the demote pass reported "no promoted observations
+# left to demote" and the LLM pass could find only -83 bytes against a
+# 1,855-byte overrun, with zero near-duplicate blocks in the file.
+#
+# NOTE for whoever raises this again: the budget is also the demote TRIGGER
+# (mem_size > HOTCORE_BUDGET_BYTES). Raising it does not reduce growth, it
+# only stops the demote pass from firing until the next line is crossed, so
+# pair every raise with a real prune. The durable fix is the tracked
+# hotcore-retrieval-split (stop injecting situational corrections every call,
+# retrieve them instead).
+HOTCORE_BUDGET_BYTES = 30000
 
 logger = logging.getLogger(__name__)
 

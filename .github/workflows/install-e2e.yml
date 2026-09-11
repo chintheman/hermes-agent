@@ -87,6 +87,10 @@ jobs:
       # One release breaking is worth knowing about even if another already
       # failed, so let every leg report.
       fail-fast: false
+      # Cap parallel legs: every update leg fetches the full upstream repo
+      # anonymously, and an uncapped burst trips GitHub HTTP 429 rate limits.
+      # The installer matrix below already caps at 3 for the same reason.
+      max-parallel: 3
       matrix:
         install-ref: ${{ fromJSON(needs.pick-releases.outputs.tags) }}
     uses: ./.github/workflows/install-e2e-run.yml
