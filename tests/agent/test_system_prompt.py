@@ -266,6 +266,21 @@ class TestAdhdOutputRulesGuidance:
         stable = _stable_prompt(agent)
         assert "# ADHD Output Rules" in stable
 
+    def test_v2_structural_elements_present(self):
+        """v2 block keeps Rule 0, scope sentence and off-switches.
+
+        Guards against a future edit silently dropping the approved v2
+        structure (Rule 0 precedence, scope boundary, tiered off-switches).
+        """
+        agent = _make_agent()
+        delattr(agent, "_adhd_output_rules")
+        stable = _stable_prompt(agent)
+        assert "## Rule 0 — Substance governs format" in stable
+        assert "govern prose you write to the user in chat" in stable
+        assert "## Off-switches" in stable
+        assert "## The Rules" in stable
+        assert "11. **Plain English is the register, always.**" in stable
+
     def test_suppressed_when_output_style_broadcast(self):
         """output_style: broadcast opts out even when rules would apply."""
         agent = _make_agent(_adhd_output_rules=True, _output_style="broadcast")
