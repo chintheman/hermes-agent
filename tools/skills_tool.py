@@ -592,6 +592,14 @@ def skill_view(
             result["compatibility"] = frontmatter["compatibility"]
         if isinstance(metadata, dict):
             result["metadata"] = metadata
+        # Usage telemetry. Until 2026-09-13 a successful skill_view logged nothing,
+        # while failures logged the name -- so the only durable trace of which skills
+        # actually get loaded was a trace of the ones that broke. An audit of 212
+        # skills could not tell "never used" from "never recorded", which is the
+        # difference between archiving dead weight and deleting something live.
+        # INFO, not DEBUG: DEBUG is filtered out of agent.log entirely.
+        # Keep this line's shape stable -- it is meant to be grepped and counted.
+        logger.info("skill_view served skill=%s path=%s", skill_name, rel_path)
         return _json(result)
     except Exception as e:
         return tool_error(str(e), success=False)
