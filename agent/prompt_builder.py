@@ -497,10 +497,14 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
 )
 
 
-# ADHD Output Rules — universal conversational-format governance.
+# Skim Master Rules — universal conversational-format governance.
 #
 # Source: ayghri/i-have-adhd (MIT). Adopted Jul 26, 2026.
 #
+# The config key keeps its legacy name `adhd_output_rules` on purpose. The
+# product was renamed to Skim Master on 2026-09-14, but the key is a stored
+# identifier, not a display name: renaming it would silently reset anyone who
+# had set it to false, since the loader defaults to True. Do not 'fix' it.
 # Applied to every session by default (agent.adhd_output_rules: true in
 # config.yaml).  These rules shape conversational responses for readability
 # and action-orientation.  They are deliberately generic: they fit any
@@ -514,8 +518,8 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
 # digests, dashboards) and have their own purpose-built format governance,
 # set ``output_style: broadcast`` in the active profile's config.yaml
 # under the ``agent`` section.  This suppresses this block entirely.
-ADHD_OUTPUT_RULES_GUIDANCE = (
-    "# ADHD Output Rules — chat output governance\n"
+SKIM_MASTER_RULES_GUIDANCE = (
+    "# Skim Master Rules — chat output governance\n"
     "\n"
     "## Scope\n"
     "These rules govern prose you write to the user in chat. File contents, document "

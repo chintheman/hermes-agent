@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.prompt_builder import (
-    ADHD_OUTPUT_RULES_GUIDANCE,
+    SKIM_MASTER_RULES_GUIDANCE,
     DEFAULT_AGENT_IDENTITY, EXECUTION_GUIDANCE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE, HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, KANBAN_GUIDANCE,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
@@ -501,12 +501,12 @@ def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool
 def _guidance_parts(agent: Any) -> List[str]:
     """Universal + tool-aware + model-gated guidance blocks, each gated by its config.yaml key."""
     parts: List[str] = []
-    # ADHD Output Rules — universal conversational-format governance.
+    # Skim Master Rules — universal conversational-format governance.
     # Applied by default to ALL conversational sessions.  Opt out via
     # config.yaml agent.adhd_output_rules: false, or set output_style:
     # broadcast for report-style sessions with their own format governance.
     if getattr(agent, "_adhd_output_rules", True) and getattr(agent, "_output_style", "conversational") != "broadcast":
-        parts.append(ADHD_OUTPUT_RULES_GUIDANCE)
+        parts.append(SKIM_MASTER_RULES_GUIDANCE)
     if agent.valid_tool_names:
         parts += [
             text for flag, text in (

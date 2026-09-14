@@ -1344,13 +1344,13 @@ def _apply_agent_section(agent, _agent_cfg):
             from tools.env_probe import warm_environment_probe_async
             warm_environment_probe_async()
 
-    # ADHD Output Rules — universal conversational-format governance.
+    # Skim Master Rules — universal conversational-format governance.
     # Default true (applied to ALL conversational sessions).
     # Set agent.adhd_output_rules: false to disable globally.
     agent._adhd_output_rules = bool(_agent_section.get("adhd_output_rules", True))
 
-    # Output style — "conversational" (default, applies ADHD rules) or
-    # "broadcast" (skips ADHD rules for structured-report sessions).
+    # Output style — "conversational" (default, applies Skim Master rules) or
+    # "broadcast" (skips Skim Master rules for structured-report sessions).
     # Profiles set this in their own config.yaml under the agent section.
     _output_style_in = _agent_section.get("output_style", "conversational")
     if isinstance(_output_style_in, str):
