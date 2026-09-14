@@ -181,7 +181,12 @@ def test_deepseek_deprecated_aliases_price_as_flash():
     ``deepseek-flash`` entry, or sessions on the legacy names over/under-report cost."""
     flash = get_pricing_entry("deepseek-flash", provider="deepseek")
     assert flash is not None
-    for alias in ("deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"):
+    for alias in (
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+        "deepseek-chat",
+        "deepseek-reasoner",
+    ):
         entry = get_pricing_entry(alias, provider="deepseek")
         assert entry is not None, alias
         assert entry.input_cost_per_million == flash.input_cost_per_million, alias
