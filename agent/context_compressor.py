@@ -436,7 +436,13 @@ def salvage_grown_transcript(
                 msg.pop(key, None)
         if msg.get("role") == "tool" and index not in keep_tools:
             content = msg.get("content")
-            if isinstance(content, str) and len(content) > _PRUNE_MIN_CHARS:
+            # Never wipe a failure. This last-resort salvage replaces tool output
+            # with a generic placeholder keyed only on size, so without this check
+            # a traceback or non-zero exit is erased and the transcript reads as
+            # though the step succeeded. Same guarantee _demote_tool_result_at
+            # already had; this path did not.
+            if (isinstance(content, str) and len(content) > _PRUNE_MIN_CHARS
+                    and not _looks_like_failure(content)):
                 msg["content"] = _PRUNED_TOOL_PLACEHOLDER
         content = msg.get("content")
         if (
@@ -654,6 +660,30 @@ _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 def _is_summary_stub(content: str) -> bool:
     """True for a tool result already replaced by a 1-line ``[tool] ... (N chars)`` summary."""
     return content.startswith("[") and " chars)" in content and len(content) < 400
+
+
+# A failing tool result must never be replaced by a success-shaped 1-line summary: the failure IS
+# the payload the model needs in order to stop repeating the call. Matched on a bounded head+tail
+# so the test stays cheap on the prune hot path. Deliberately biased toward preservation — a false
+# positive costs context, a false negative costs the only evidence of what went wrong.
+_FAILURE_MARKERS = re.compile(
+    r'"exit_code"\s*:\s*-?[1-9]\d*'                    # terminal: non-zero exit
+    r'|"isError"\s*:\s*true|"errorCategory"\s*:'        # structured tool-error envelope
+    r'|Traceback \(most recent call last\)'
+    r'|\b(?:[A-Z]\w*)?(?:Error|Exception)\b\s*:'       # ValueError: / CalledProcessError:
+    r'|^\s*(?:FAILED|ERROR)\b'                          # pytest / unittest
+    r'|\bcommand not found\b|\bPermission denied\b'
+    r'|\bexit(?:ed)? (?:with )?(?:status|code) [1-9]',
+    re.MULTILINE,
+)
+
+
+def _looks_like_failure(content: str) -> bool:
+    """True when a tool result records a failure and must be spared by the prune passes."""
+    return bool(
+        _FAILURE_MARKERS.search(content[:4000]) or _FAILURE_MARKERS.search(content[-4000:])
+    )
+
 
 
 # Shared floor; the clarify summary cap must stay strictly BELOW it so a preserved
@@ -2746,6 +2776,12 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         ):
             return False
         tool_name, tool_args = call_id_to_tool.get(msg.get("tool_call_id", ""), ("unknown", ""))
+        # Budget the payload, preserve the failure. This is the ONE carve-out from pass 2's
+        # "old results become 1-line summaries" rule: a summarized failure reads as success, so
+        # the model re-issues the same call forever. Applies to every path that lands here, which
+        # includes the pressure pass inside the protected tail.
+        if _looks_like_failure(content):
+            return False
         if protected_skills and tool_name == "skill_view":
             _skill = _json_dict(tool_args).get("name", "")
             if isinstance(_skill, str) and _skill.lower() in protected_skills:
@@ -3180,7 +3216,12 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             content = msg.get("content")
             if msg.get("role") != "tool" or i in protected or not isinstance(content, str):
                 continue
-            if len(content) < _LEAN_TAIL_DEMOTE_MIN_CHARS or SKILL_PRUNED_MARKER_PREFIX in content or _is_summary_stub(content):
+            # _looks_like_failure: lean tail demotion is the DEFAULT path and runs
+            # on every compress() call, so without this check a failed tool result
+            # is routinely swapped for a "demoted, recover with session_search"
+            # stub and the failure silently stops being visible in context.
+            if (len(content) < _LEAN_TAIL_DEMOTE_MIN_CHARS or SKILL_PRUNED_MARKER_PREFIX in content
+                    or _is_summary_stub(content) or _looks_like_failure(content)):
                 continue
             result[i] = _rewritten(msg, _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id))
             demoted += 1
