@@ -1,0 +1,126 @@
+name: Install & Update E2E autoretry
+
+# GitHub's scheduled dispatcher sometimes fails to load install-e2e.yml. The
+# run it leaves behind has no jobs, a zero-second duration, no log to fetch,
+# and a name that falls back to the file path -- and both the UI and
+# `gh run view` then blame the workflow file. The file is not the problem: the
+# same commit runs green on either side of such a failure, and the run cannot
+# be retried through the API at all ("This workflow run cannot be retried"), so
+# a fresh dispatch of the same workflow on the same commit is the only route
+# back to a verdict. That is all this does.
+#
+# Every guard must hold before anything is dispatched:
+#   * the dead run is on main -- a dispatch can only target the default branch;
+#   * the dead run sits at the current head of main, so the retry exercises the
+#     same code the dead run was created to test;
+#   * it recorded zero jobs. A run that started and then failed has logs, and
+#     belongs in the normal review path, not here;
+#   * no dispatch for that commit has happened since, so a retry that itself
+#     fails to start cannot loop.
+#
+# The workflow_run filter names the workflow by path on purpose: that is the
+# name GitHub has registered for install-e2e.yml (see the workflows API), and
+# it is exactly the name a definition-less run falls back to. The friendly
+# name is listed too, so the trigger survives either registration.
+
+on:
+  workflow_run:
+    workflows:
+      - '.github/workflows/install-e2e.yml'
+      - 'Install & Update E2E'
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Report what would be retried, dispatch nothing.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: install-e2e-autoretry
+  cancel-in-progress: false
+
+jobs:
+  autoretry:
+    name: Retry a run that never started
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Re-dispatch install-e2e for the head of main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry-run || 'false' }}
+          WINDOW_MIN: '90'
+        run: |
+          set -uo pipefail
+
+          WF='install-e2e.yml'
+          # python3 rather than `date -d`: same output on the runner and on a
+          # developer's laptop, so this script can be run and checked locally.
+          since=$(python3 -c "import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(minutes=int('${WINDOW_MIN}'))).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+          head_sha=$(gh api "repos/$REPO/commits/main" --jq .sha)
+          echo "head of main: $head_sha (looking back ${WINDOW_MIN}m, to $since)"
+
+          gh api "repos/$REPO/actions/workflows/$WF/runs?per_page=50" \
+            --jq ".workflow_runs[]
+                  | select(.head_branch == \"main\")
+                  | select(.head_sha == \"$head_sha\")
+                  | select(.created_at >= \"$since\")
+                  | \"\(.id) \(.event) \(.conclusion)\"" > /tmp/recent.txt || true
+
+          dead=''
+          retried=''
+          while read -r id event conclusion; do
+            [ -n "${id:-}" ] || continue
+            if [ "$conclusion" = 'failure' ]; then
+              jobs=$(gh api "repos/$REPO/actions/runs/$id/jobs" --jq .total_count)
+              echo "run $id ($event): $jobs job(s)"
+              if [ "$jobs" = '0' ]; then dead="$id"; fi
+            fi
+            if [ "$event" = 'workflow_dispatch' ]; then retried="$id"; fi
+          done < /tmp/recent.txt
+
+          if [ -z "$dead" ]; then
+            echo "No run failed to start for $head_sha in the last ${WINDOW_MIN}m. Nothing to do."
+            exit 0
+          fi
+
+          if [ -n "$retried" ]; then
+            echo "Run $dead never started, but a dispatch for $head_sha already exists (run $retried). Leaving its verdict to stand."
+            exit 0
+          fi
+
+          echo "Run $dead never started: zero jobs, no log, not retryable."
+          if [ "$DRY_RUN" = 'true' ]; then
+            echo "dry-run: would dispatch $WF on main for $head_sha."
+            exit 0
+          fi
+
+          # A dispatch that silently does not take is the one outcome that
+          # would leave this job green while fixing nothing, so check that a
+          # new run actually appeared before reporting success.
+          latest_before=$(gh run list --repo "$REPO" --workflow "$WF" --limit 1 \
+            --json databaseId --jq '.[0].databaseId')
+
+          gh workflow run "$WF" --repo "$REPO" --ref main
+          sleep 20
+
+          latest_after=$(gh run list --repo "$REPO" --workflow "$WF" --limit 1 \
+            --json databaseId --jq '.[0].databaseId')
+
+          if [ "$latest_after" = "$latest_before" ]; then
+            echo "dispatch did not start a new run (latest is still $latest_before)"
+            exit 1
+          fi
+
+          echo "dispatched: run $latest_after"
