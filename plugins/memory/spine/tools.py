@@ -22,7 +22,7 @@ from .config import SpineConfig
 from .jsonl_writer import JSONLWriter
 from .secrets_detector import detect_secrets
 from .embedder import embedder_available, embed_single, embed
-from .index import MemoryIndex, _fts5_safe_query
+from .index import MemoryIndex, _fts5_safe_query, DEFAULT_K
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +313,10 @@ def handle_recall(args: Dict[str, Any], config: SpineConfig) -> str:
     # agent:claude-code was that one recall should reach both stores. Writes
     # and consolidation stay pinned to a single profile.
     profile = args.get("profile", "*")
-    k = min(args.get("k", 20), 25)
+    # Depth follows DEFAULT_K (raised 20 -> 25 on 2026-09-14, see index.py) so the
+    # live path and the eval cannot drift apart again; the cap keeps a single
+    # explicit request bounded.
+    k = min(args.get("k", DEFAULT_K), 25)
 
     idx = _get_index(config)
 

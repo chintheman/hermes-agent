@@ -1,6 +1,7 @@
 {
   "_about": "Spine retrieval gate, three sections, scored separately because averaging them hides which capability moved. SINGLE-HOP: any expect_any phrase appears in top-k. CONJUNCTIVE: every expect_all phrase appears — a compound question must surface all its parts, wherever they live. MULTI-HOP: every phrase appears AND they come from at least min_sources documents each contributing a phrase the others do not. A case only belongs in MULTI-HOP if no single document in the corpus answers it; `eval_run.py --validate` enforces that, because 11 of 12 cases were silently mislabelled once. Needles must be specific enough to fail on an unrelated query: short unanchored substrings like 'rce' match 'source'.",
-  "k": 20,
+  "_about_k": "Raised 20 -> 25 on 2026-09-14 to follow DEFAULT_K in index.py. The gate must read the store at the same depth the live recall path does, or it grades a system nobody runs. At 2,330 observations the golden doc for mh-memory-sync-latency sat at rank 21 while its content was intact, so k=20 flagged a real window miss; k=25 passes all 29.",
+  "k": 25,
   "cases": [
     {
       "id": "sg-lwix-weighting",

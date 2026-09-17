@@ -223,7 +223,22 @@ def _entity_match_boost(query_words: set, row: Dict[str, Any], boost: float = 1.
 # below the cutoff -- 7/12 multi-hop cases passed. k=20 passes 9/12 at the same
 # latency (17.6ms vs 17.9ms), because the candidate pool was already being
 # fetched and scored; only the final slice was throwing the results away.
-DEFAULT_K = 20
+#
+# Raised 20 -> 25 on 2026-09-14 for the same reason as the candidate-pool bump
+# (60 -> 200 on 2026-08-25): the store outgrew the tuning. At 2,330 observations
+# the golden observation for eval case mh-memory-sync-latency (obs
+# 094BMZDETBKM5RGB8H2WD0YY6K, profile agent:claude-code) sat at rank 21 -- one
+# place outside the window -- while the content itself was intact and carried
+# both needles. At k=25 all 29 eval cases pass; at k=20 one does not.
+# Measured cost of the extra rows across all 29 eval queries: 23,168 -> 28,423
+# chars of payload, +5,255 chars (~1,314 tokens, +22.7%) per recall CALL -- and
+# recall is agent-invoked rather than per-turn. k=25 also matches what
+# handle_reflect already used, so the read paths now share one depth.
+# This buys margin, not a cure: 11 of that query's top 20 are near-duplicate
+# wiki chunks, so the window will saturate again as the store grows. The durable
+# fix is a wiki-share cap or chunk dedupe in search_hybrid, which costs no
+# tokens and would let this return to 20.
+DEFAULT_K = 25
 
 SEARCHABLE_STATUSES = ("active", "promoted", "demoted")
 _STATUS_PLACEHOLDERS = ",".join("?" * len(SEARCHABLE_STATUSES))
