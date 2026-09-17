@@ -22,8 +22,8 @@ name: Install & Update E2E autoretry
 #     same code the dead run was created to test;
 #   * it recorded zero jobs. A run that started and then failed has logs, and
 #     belongs in the normal review path, not here;
-#   * no dispatch for that commit has happened since, so a retry that itself
-#     fails to start cannot loop.
+#   * no dispatch for that commit has happened in the look-back window, so a
+#     retry that itself fails to start cannot loop.
 #
 # The workflow_run filter names the workflow by path on purpose: that is the
 # name GitHub has registered for install-e2e.yml (see the workflows API), and
@@ -37,9 +37,10 @@ on:
       - 'Install & Update E2E'
     types: [completed]
   schedule:
-    # The gap between a dead run and its retry has to stay inside the
-    # 90-minute window the scan below looks back over, so poll well within
-    # it. Off the hour, to miss the top-of-hour runner crunch.
+    # GitHub runs these late -- install-e2e's own 12-hourly schedule has
+    # fired 3-5 hours past its slot -- so the poll is a catch-up, not a
+    # clock, and the scan below looks back far enough to meet it. Off the
+    # hour, to miss the top-of-hour runner crunch.
     - cron: '11,41 * * * *'
   workflow_dispatch:
     inputs:
@@ -73,7 +74,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           DRY_RUN: ${{ inputs.dry-run || 'false' }}
-          WINDOW_MIN: '90'
+          # A dead run stays dead, and this repo's main head can hold for a
+          # day, so the look-back is sized to the schedule it is cleaning up
+          # after rather than to the poll interval.
+          WINDOW_MIN: '720'
         run: |
           set -uo pipefail
 
