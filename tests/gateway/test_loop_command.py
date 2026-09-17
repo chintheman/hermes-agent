@@ -257,3 +257,67 @@ async def test_post_turn_session_resolution_failure_is_logged(loop_env, caplog):
         )
 
     assert "post-turn session resolution failed: store unavailable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_loop_command_slow_db_init_persists_and_keeps_loop_free(loop_env, monkeypatch):
+    """A slow state.db init (cold cache, first /loop of the process) must
+    neither freeze the event loop nor silently drop the loop write.
+
+    The gateway warms the shared SessionDB off-loop before building the
+    manager, so the reply is honest at any init duration. The bootstrap
+    window alone expires on a loaded CI box — that is the flake this pins
+    (slice 3/12, run 35227315987): the reply said "Loop set", save_loop
+    dropped the write behind the expired window, and a fresh
+    ``load_loop`` came back None (4 failures, all on this read-back).
+    """
+    import hermes_state
+    from hermes_cli import goals
+
+    # Past the init window, so the window-only path expires its wait and
+    # drops the write — this test discriminates warm-up from windows.
+    # The margin is 2.5s so the loop-gap ceiling below can be 2.0s (the
+    # flake-policy floor) and an on-loop init still exceeds it.
+    INIT_S = goals._DB_BOOTSTRAP_INIT_WAIT_S + 2.5
+
+    class _SlowSessionDB(hermes_state.SessionDB):
+        def __init__(self, *a, **k):
+            time.sleep(INIT_S)
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(hermes_state, "SessionDB", _SlowSessionDB)
+
+    runner = _make_runner()
+
+    gaps = {"max": 0.0}
+    stop = asyncio.Event()
+
+    async def _ticker():
+        last = time.monotonic()
+        while not stop.is_set():
+            await asyncio.sleep(0.05)
+            now = time.monotonic()
+            gaps["max"] = max(gaps["max"], now - last)
+            last = now
+
+    ticker = asyncio.create_task(_ticker())
+    await asyncio.sleep(0.15)
+    try:
+        response = await GatewayRunner._handle_loop_command(
+            runner, _make_event("/loop 5m poll CI")
+        )
+
+        assert "Loop set" in response
+        state = loops.load_loop("sid-gateway-loop")
+        assert state is not None, "loop write must persist even with a slow init"
+        assert state.prompt == "poll CI"
+        # 2.0s is the loose-bound floor from the flake policy. The init
+        # (4.0s) runs off-loop, so an on-loop regression exceeds this
+        # ceiling and a loaded runner does not.
+        assert gaps["max"] < 2.0, (
+            f"event loop frozen for {gaps['max']:.2f}s while the init ran off-loop"
+        )
+    finally:
+        stop.set()
+        await ticker
+        goals._DB_CACHE.clear()

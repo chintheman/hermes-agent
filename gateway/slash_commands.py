@@ -3045,6 +3045,13 @@ class GatewaySlashCommandsMixin:
         sid = getattr(session_entry, "session_id", None) or ""
         if not sid:
             return None, None
+        # Cold-cache safety (same fix as /goal, #88965): constructing the
+        # manager runs load_loop → the shared SessionDB bootstrap, which on
+        # this event-loop thread rides a bounded grace window rather than
+        # waiting for the real init. On a loaded box that window expires,
+        # the manager reads state=None, the /loop write is dropped, and the
+        # reply still says "Loop set". Warm the cache off-loop first.
+        await self._warm_session_db("loop manager")
         return LoopManager(session_id=sid), session_entry
 
     async def _handle_loop_command(self, event: "MessageEvent") -> str:

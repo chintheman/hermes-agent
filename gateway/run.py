@@ -20998,20 +20998,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             return 20
 
-    async def _warm_goals_session_db(self, ctx: str) -> None:
-        """Warm the goals SessionDB cache off-loop (best-effort).
+    async def _warm_session_db(self, ctx: str) -> None:
+        """Warm the shared SessionDB cache off-loop (best-effort).
 
-        A cold cache runs the state.db init on the loop thread behind the
-        bootstrap windows. That freezes the loop for the init duration.
-        The executor hop keeps the profile home override alive under
-        multiplex, so the warm cache belongs to the caller's profile.
-        On failure the caller falls back to the bootstrap windows, so a
-        dropped warm-up is a bounded stall, never a crash.
+        Goals, loops, and heartbeats share one cached SessionDB
+        (``hermes_cli.goals._get_session_db``). A cold cache runs the
+        state.db init on the loop thread behind the bootstrap windows —
+        which freezes the loop for the init duration and, on a loaded
+        box, expires the window and silently drops the first write. The
+        executor hop waits for the real init and keeps the profile home
+        override alive under multiplex, so the warm cache belongs to the
+        caller's profile. On failure the caller falls back to the
+        bootstrap windows, so a dropped warm-up is a bounded stall,
+        never a crash.
         """
         try:
-            from hermes_cli.goals import _get_session_db as _warm_goals_db
+            from hermes_cli.goals import _get_session_db as _warm_db
 
-            await self._run_in_executor_with_context(_warm_goals_db)
+            await self._run_in_executor_with_context(_warm_db)
         except Exception as exc:
             logger.warning("%s: session DB warm-up failed: %s", ctx, exc)
 
@@ -21029,7 +21033,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Warm the SessionDB cache off-loop. A cold cache freezes the
         # loop for the init duration and drops the first write: the
         # /goal reply claims the goal was set.
-        await self._warm_goals_session_db("goal manager")
+        await self._warm_session_db("goal manager")
         try:
             # Session lookups on behalf of an internal event must not advance
             # the user-activity clock that drives idle/daily reset policy
@@ -21059,7 +21063,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return None, None
         # Warm the SessionDB cache off-loop. A cold cache can drop the
         # first /heartbeat write while the reply claims it was set.
-        await self._warm_goals_session_db("heartbeat manager")
+        await self._warm_session_db("heartbeat manager")
         try:
             # Same reset-policy contract as _get_goal_manager_for_event:
             # internal events look up the session without touching activity.
@@ -21114,7 +21118,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # be registered through the warmed /heartbeat command, so
                 # this covers only the degraded path where that warm-up
                 # failed.
-                await self._warm_goals_session_db("heartbeat poll")
+                await self._warm_session_db("heartbeat poll")
                 for quick_key, (source, session_id) in list(watch.items()):
                     try:
                         # Busy sessions coalesce their tick to the next idle poll.
@@ -21250,7 +21254,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # state.db init on the loop thread at the turn boundary (the
         # 2026-08-14 crash-loop seam). A slow init can drop the goal
         # read and silently end the goal loop.
-        await self._warm_goals_session_db("goal continuation")
+        await self._warm_session_db("goal continuation")
 
         mgr = GoalManager(session_id=sid, default_max_turns=max_turns)
         if not mgr.is_active():
@@ -21397,6 +21401,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not sid:
             return
 
+        # Cold-cache safety (same fix as /goal, #88965): the manager's
+        # constructor loads loop state through the shared SessionDB, and a
+        # cold cache on this loop thread rides a bounded bootstrap window
+        # instead of waiting for the real init. Warm it off-loop first so
+        # completing a tick can't silently no-op behind a slow init.
+        await self._warm_session_db("loop completion")
+
         mgr = LoopManager(session_id=sid)
         state = mgr.state
         if state is None or not state.awaiting_response:
@@ -21434,6 +21445,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     goal_blocks_loop_tick,
                     list_active_loops,
                 )
+
+                # list_active_loops() reads the shared SessionDB; warm the
+                # cache off-loop so a cold first scan can't come back empty
+                # (a due loop would then wait for the watcher's next tick).
+                await self._warm_session_db("loop wakeup watcher")
 
                 now = time.time()
                 for sid, state in list_active_loops():
