@@ -100,7 +100,14 @@ _NEVER_TRACK_TOP_LEVEL = frozenset({
     # User-authored and project trees — never auto-delete files inside these just because they happen to be
     # named test_* or tmp_* (#75403, also #32164, #37721).
     "patches", "projects", "skins", "themes", "contributors",
-    "profiles", "backups", "optional-skills"})
+    "profiles", "backups", "optional-skills",
+    # ``scripts`` holds PERMANENT operational code and its test suite, not scratch files
+    # named after tests. Without this entry a real pytest file at
+    # ``scripts/tests/test_*.py`` classifies as ``test`` and is deleted at session end
+    # (age >= 0) — it destroyed three working test files twice in one session before the
+    # cause was found in ~/.hermes/disk-cleanup/cleanup.log. Same intent as the project
+    # trees above: the NAME must not be what makes a file disposable.
+    "scripts"})
 
 @functools.lru_cache(maxsize=1)  # built lazily so HERMES_HOME resolves once
 def _protected_cron_paths() -> frozenset:
