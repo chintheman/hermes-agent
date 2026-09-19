@@ -279,7 +279,7 @@ class TestAdhdOutputRulesGuidance:
         assert "govern prose you write to the user in chat" in stable
         assert "## Off-switches" in stable
         assert "## The Rules" in stable
-        assert "11. **Plain English is the register, always.**" in stable
+        assert "## Simple English is the register for every line below" in stable
 
     def test_suppressed_when_output_style_broadcast(self):
         """output_style: broadcast opts out even when rules would apply."""
