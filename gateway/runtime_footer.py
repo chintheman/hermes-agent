@@ -15,6 +15,10 @@ Available fields:
     model        — bare model id, vendor prefix dropped (``gpt-5.4``)
     context_pct  — last-call context occupancy as a percent (``5%``)
     latency      — wall-clock duration of the turn (``22s``, ``1m05s``)
+    served_model — opt-in, ``alias → served``: the deployment a routing proxy
+                   reported via ``x-litellm-model-id`` / ``x-litellm-model-api-base``,
+                   or Hermes' own fallback route; skipped when the served model is
+                   the requested one
     cwd          — home-relative working dir (``~``)
     rate_tier    — billing tier for the current hour (``peak`` / ``off-peak``)
                    for providers with time-of-use pricing, e.g. DeepSeek's
@@ -22,8 +26,8 @@ Available fields:
                    ``rate_windows`` below. Skipped silently when the active
                    model matches no configured window.
 
-``latency`` and ``rate_tier`` are opt-in: they are NOT in the default field
-set, so a footer whose ``fields`` are unset renders exactly as before.
+``latency``, ``served_model`` and ``rate_tier`` are opt-in: they are NOT in the
+default field set, so a footer whose ``fields`` are unset renders exactly as before.
 
 ``rate_windows`` (optional) — time-of-use pricing windows, keyed by model
 substring (matched case-insensitively against the bare model id). When
@@ -117,6 +121,20 @@ def _model_short(model: Optional[str]) -> str:
     if not model:
         return ""
     return model.rsplit("/", 1)[-1]
+
+
+def _env_cwd() -> str:
+    """``TERMINAL_CWD`` under the active terminal scope, else the process env.
+
+    The terminal scope wins so a footer rendered inside a scoped profile reports
+    THAT profile's cwd, not the launch profile's (same rule as every other
+    profile-level env read under multiplex).
+    """
+    try:
+        from tools.terminal_scope import terminal_env
+    except ImportError:
+        return os.environ.get("TERMINAL_CWD", "")
+    return terminal_env("TERMINAL_CWD", "")
 
 
 # DeepSeek peak/off-peak billing windows, in UTC (source: api-docs.deepseek.com
@@ -324,84 +342,55 @@ def _format_latency(seconds: float) -> str:
     return f"{m}m{sec:02d}s"
 
 
-def format_runtime_footer(
-    *,
-    model: Optional[str],
-    context_tokens: int,
-    context_length: Optional[int],
-    cwd: Optional[str] = None,
-    turn_seconds: Optional[float] = None,
-    fields: Iterable[str] = _DEFAULT_FIELDS,
-    rate_windows: Optional[dict[str, Any]] = None,
-) -> str:
-    """Render the footer line, or return "" if no fields have data.
-
-    Fields are skipped silently when their underlying data is missing — a
-    partially-populated footer is better than a line with ``?%`` or empty slots.
-    ``rate_windows`` is the resolved time-of-use window map (defaults merged);
-    pass ``None`` to use the built-in DeepSeek default.
-    """
-    parts: list[str] = []
-    for field in fields:
-        if field == "model":
-            m = _model_short(model)
-            if m:
-                parts.append(m)
-        elif field == "context_pct":
-            if context_length and context_length > 0 and context_tokens >= 0:
-                pct = max(0, min(100, round((context_tokens / context_length) * 100)))
-                parts.append(f"{pct}%")
-        elif field == "latency":
-            # Wall-clock turn duration. Skipped when the caller supplied no
-            # timing (call sites that don't measure) or the value is negative.
-            if turn_seconds is not None and turn_seconds >= 0:
-                parts.append(_format_latency(turn_seconds))
-        elif field == "cwd":
-            rel = _home_relative_cwd(cwd or os.environ.get("TERMINAL_CWD", ""))
-            if rel:
-                parts.append(rel)
-        elif field == "rate_tier":
-            # Time-of-use billing awareness (e.g. DeepSeek peak/off-peak).
-            # Rendered only when the active model matches a configured window.
-            tier = rate_tier_for_model(model, rate_windows)
-            if tier is not None:
-                parts.append(tier)
-        # Unknown field names are silently ignored.
-
-    if not parts:
+def format_runtime_footer(*, model: Optional[str], context_tokens: int,
+                          context_length: Optional[int], cwd: Optional[str] = None,
+                          turn_seconds: Optional[float] = None,
+                          requested_model: Optional[str] = None, served_model: Optional[str] = None,
+                          fields: Iterable[str] = _DEFAULT_FIELDS,
+                          rate_windows: Optional[dict[str, Any]] = None) -> str:
+    """Render the footer line, or "" if no fields have data. Fields whose data is missing (and
+    unknown field names) are skipped silently — a partial footer beats ``?%`` or empty slots.
+    ``rate_windows`` is the resolved time-of-use window map (defaults merged); pass ``None`` to
+    use the built-in DeepSeek default."""
+    def context_pct() -> str:
+        if context_length and context_length > 0 and context_tokens >= 0:
+            return f"{max(0, min(100, round((context_tokens / context_length) * 100)))}%"
         return ""
-    return _SEP.join(parts)
+
+    def served() -> str:
+        requested = requested_model or model
+        alias = _model_short(requested)
+        if served_model and served_model not in (alias, requested):
+            return f"{alias} → {served_model}"
+        return ""
+
+    renderers = {
+        "model": lambda: _model_short(model),
+        "served_model": served,
+        "context_pct": context_pct,
+        # Skipped when the caller did not measure (None) or the value is negative.
+        "latency": lambda: _format_latency(turn_seconds) if turn_seconds is not None and turn_seconds >= 0 else "",
+        # Time-of-use billing awareness (e.g. DeepSeek peak/off-peak). Rendered only
+        # when the active model matches a configured window.
+        "rate_tier": lambda: rate_tier_for_model(model, rate_windows) or "",
+        "cwd": lambda: _home_relative_cwd(cwd or _env_cwd()),
+    }
+    return _SEP.join(v for field in fields if (render := renderers.get(field)) and (v := render()))
 
 
-def build_footer_line(
-    *,
-    user_config: dict[str, Any] | None,
-    platform_key: str | None,
-    model: Optional[str],
-    context_tokens: int,
-    context_length: Optional[int],
-    cwd: Optional[str] = None,
-    turn_seconds: Optional[float] = None,
-) -> str:
-    """Top-level entry point used by gateway/run.py.
-
-    Returns the footer text (empty string when disabled or no data).  Callers
-    append this to the final response themselves, preserving a single blank
-    line of separation.
-
-    ``turn_seconds`` is the wall-clock duration of the agent run, measured by
-    the caller with ``time.monotonic()``.  Callers that don't measure it leave
-    it ``None`` and the ``latency`` field is skipped.
-    """
+def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str | None,
+                      model: Optional[str], context_tokens: int, context_length: Optional[int],
+                      cwd: Optional[str] = None, turn_seconds: Optional[float] = None,
+                      requested_model: Optional[str] = None, served_model: Optional[str] = None) -> str:
+    """Entry point for gateway/run.py: footer text, or "" when disabled / no data. Callers append it
+    to the final response themselves, preserving a single blank line of separation.
+    ``turn_seconds`` is the caller-measured (``time.monotonic()``) run duration; ``None`` skips the
+    ``latency`` field."""
     cfg = resolve_footer_config(user_config, platform_key)
     if not cfg.get("enabled"):
         return ""
-    return format_runtime_footer(
-        model=model,
-        context_tokens=context_tokens,
-        context_length=context_length,
-        cwd=cwd,
-        turn_seconds=turn_seconds,
-        fields=cfg.get("fields") or _DEFAULT_FIELDS,
-        rate_windows=cfg.get("rate_windows"),
-    )
+    return format_runtime_footer(model=model, context_tokens=context_tokens,
+                                 context_length=context_length, cwd=cwd, turn_seconds=turn_seconds,
+                                 requested_model=requested_model, served_model=served_model,
+                                 fields=cfg.get("fields") or _DEFAULT_FIELDS,
+                                 rate_windows=cfg.get("rate_windows"))
