@@ -360,6 +360,42 @@ def gateway_trust_env() -> bool:
     return bool(value) if value is not None else True
 
 
+def _ownership_formatter_enabled() -> bool:
+    """``display.ownership_formatter`` from config.yaml (default True): the deterministic
+    pre-send collapse of every labelled MINE/YOURS line into one block at the end of the
+    message (``gateway/ownership_format.py``). Chin, 2026-09-27: "I need 1 summary. 1 yours and
+    mine" — default ON everywhere; an operator flips it off only to debug the formatter itself.
+    Fail-open to default, same idiom as ``gateway_trust_env``."""
+    value = _config_section("display").get("ownership_formatter", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value) if value is not None else True
+
+
+def _ownership_formatted_call(args: tuple, kwargs: dict, content_index: int) -> tuple:
+    """``(args, kwargs)`` with the ``content`` argument (positional at ``content_index`` or by
+    keyword) passed through ``format_ownership_block``. Positional/keyword-agnostic so it covers
+    every adapter's ``send``/``edit_message`` override without caring which calling convention a
+    given call site used. Never raises — a formatting failure (or a disabled flag) returns the
+    original ``args``/``kwargs`` untouched so a send is never blocked by this."""
+    try:
+        if not _ownership_formatter_enabled():
+            return args, kwargs
+        if "content" in kwargs:
+            if isinstance(kwargs["content"], str):
+                kwargs = dict(kwargs)
+                kwargs["content"] = format_ownership_block(kwargs["content"])
+            return args, kwargs
+        if len(args) > content_index and isinstance(args[content_index], str):
+            formatted = format_ownership_block(args[content_index])
+            args = args[:content_index] + (formatted,) + args[content_index + 1:]
+        return args, kwargs
+    except Exception:
+        logger.error("ownership formatter dispatch failed; sending original text unchanged",
+                     exc_info=True)
+        return args, kwargs
+
+
 def proxy_kwargs_for_aiohttp(proxy_url: str | None) -> tuple[dict, dict]:
     """``(session_kwargs, request_kwargs)`` for a standalone ``aiohttp.ClientSession``. With
     aiohttp-socks every scheme uses a connector (mautrix-style libs never forward per-request
@@ -386,6 +422,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Awaitable
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
+from gateway.ownership_format import format_ownership_block
 from gateway.platforms.helpers import fence_state_after
 from gateway.platforms.base_exec_approval import (
     EA_HEADER_TEXT, EA_REASON_LABEL_TEXT, approval_timeout_seconds, format_approval_deadline_line)
@@ -1932,6 +1969,42 @@ class BasePlatformAdapter(ABC):
         self._typing_paused: set = set()
         # Per-chat status phrase; the regular _keep_typing refresh renders it (no extra API calls).
         self._status_text: Dict[str, str] = {}
+        self._install_ownership_formatter()
+
+    def _install_ownership_formatter(self) -> None:
+        """Wrap this instance's concrete ``send``/``edit_message`` (already resolved to the
+        subclass override by the time ``BasePlatformAdapter.__init__`` runs, since ``type(self)``
+        is fixed at construction) so every outbound message passes through the deterministic
+        ownership-block formatter exactly once — see ``gateway/ownership_format.py``. This is the
+        single choke point: ~30 adapters each implement ``send`` independently (``send`` is
+        ``@abstractmethod``), so wrapping the bound instance method here covers all of them
+        without editing a single adapter file. Idempotent against double-``__init__``."""
+        if getattr(self, "_ownership_formatter_installed", False):
+            return
+        self._ownership_formatter_installed = True
+        orig_send, orig_edit = self.send, self.edit_message
+
+        async def _send(*args, **kwargs):
+            args, kwargs = _ownership_formatted_call(args, kwargs, content_index=1)
+            return await orig_send(*args, **kwargs)
+
+        async def _edit_message(*args, **kwargs):
+            args, kwargs = _ownership_formatted_call(args, kwargs, content_index=2)
+            return await orig_edit(*args, **kwargs)
+
+        self.send, self.edit_message = _send, _edit_message
+
+        # Relay's ``send_for_platform`` is a third egress door: ``gateway/delivery.py``'s
+        # ``DeliveryTransport.send`` calls it directly (never ``send()``) for a Relay transport
+        # fronting a logical platform it doesn't natively own (scheduled/persisted-home cron
+        # deliveries). Only RelayAdapter defines it today; the hasattr guard covers it without
+        # assuming which adapter class.
+        orig_send_for_platform = getattr(self, "send_for_platform", None)
+        if orig_send_for_platform is not None:
+            async def _send_for_platform(*args, **kwargs):
+                args, kwargs = _ownership_formatted_call(args, kwargs, content_index=2)
+                return await orig_send_for_platform(*args, **kwargs)
+            self.send_for_platform = _send_for_platform
 
     @property
     def message_len_fn(self) -> Callable[[str], int]:
