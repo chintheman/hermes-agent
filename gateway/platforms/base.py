@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import ipaddress
 import logging
@@ -1978,16 +1979,30 @@ class BasePlatformAdapter(ABC):
         ownership-block formatter exactly once — see ``gateway/ownership_format.py``. This is the
         single choke point: ~30 adapters each implement ``send`` independently (``send`` is
         ``@abstractmethod``), so wrapping the bound instance method here covers all of them
-        without editing a single adapter file. Idempotent against double-``__init__``."""
+        without editing a single adapter file. Idempotent against double-``__init__``.
+
+        Each wrapper carries ``functools.wraps(original)``: several call sites (notably
+        ``gateway/run_turn_runner.py``'s ``_accepts_keyword(adapter.edit_message, "metadata")``,
+        via ``agent/interrupt_compat.py``) use ``inspect.signature`` on the bound method to decide
+        whether an adapter's real override accepts an optional kwarg. A bare ``*args, **kwargs``
+        wrapper has its OWN catch-all signature, so that probe would answer "yes" for every
+        adapter regardless of what the underlying override actually accepts — a real regression
+        caught by ``tests/gateway/test_run_progress_topics.py`` (a ``metadata`` kwarg landed on a
+        fixture ``edit_message`` that never declared one, raising inside the turn loop and
+        silently dropping the edit). ``functools.wraps`` points ``inspect.signature`` at the
+        original via ``__wrapped__``, so introspection sees the real parameter list while the
+        wrapper itself still accepts ``*args, **kwargs`` at the call layer."""
         if getattr(self, "_ownership_formatter_installed", False):
             return
         self._ownership_formatter_installed = True
         orig_send, orig_edit = self.send, self.edit_message
 
+        @functools.wraps(orig_send)
         async def _send(*args, **kwargs):
             args, kwargs = _ownership_formatted_call(args, kwargs, content_index=1)
             return await orig_send(*args, **kwargs)
 
+        @functools.wraps(orig_edit)
         async def _edit_message(*args, **kwargs):
             args, kwargs = _ownership_formatted_call(args, kwargs, content_index=2)
             return await orig_edit(*args, **kwargs)
@@ -2001,6 +2016,7 @@ class BasePlatformAdapter(ABC):
         # assuming which adapter class.
         orig_send_for_platform = getattr(self, "send_for_platform", None)
         if orig_send_for_platform is not None:
+            @functools.wraps(orig_send_for_platform)
             async def _send_for_platform(*args, **kwargs):
                 args, kwargs = _ownership_formatted_call(args, kwargs, content_index=2)
                 return await orig_send_for_platform(*args, **kwargs)
