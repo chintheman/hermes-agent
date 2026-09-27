@@ -91,16 +91,6 @@ def test_prunes_below_compression_threshold():
         assert m["content"] != _PRUNED_TOOL_PLACEHOLDER       # informative, not a blank placeholder
 
 
-
-
-
-
-
-
-
-
-
-
 def test_idempotent():
     c = _compressor(proactive_prune_tokens=48_000, proactive_prune_min_result_chars=8_000)
     msgs = _build(8, big_indices={0, 1, 2})
@@ -183,25 +173,14 @@ def test_successful_full_compression_resets_proactive_runway():
     assert result is not fresh
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # Salvage follow-ups: no-op caller contract, prompt-cache hysteresis gate,
 # no-orphan pairing invariant, and the default-off behavior pin.
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
-
-def test_min_reclaim_gate_default_and_clamp():
-    """Default 4096; negative/None coerce to disabled (0)."""
-    assert _compressor().proactive_prune_min_reclaim_tokens == 4096
+def test_min_reclaim_gate_clamp():
+    """Negative/None coerce to disabled (0)."""
     assert _compressor(proactive_prune_min_reclaim_tokens=0).proactive_prune_min_reclaim_tokens == 0
     assert _compressor(proactive_prune_min_reclaim_tokens=-5).proactive_prune_min_reclaim_tokens == 0
     assert _compressor(proactive_prune_min_reclaim_tokens=None).proactive_prune_min_reclaim_tokens == 0

@@ -341,7 +341,7 @@ def test_query_text_for_recall_handles_every_message_shape():
     of content parts there, and both memory hooks guarded on isinstance(str)
     and fell back to "". Silently: prefetch_all returns "" for an empty query
     and the caller swallows exceptions."""
-    from agent.turn_context import query_text_for_recall as q
+    from agent.turn_context import _memory_query_text as q
 
     assert q("check the ledger") == "check the ledger"
     assert q([{"type": "text", "text": "check the ledger"},
@@ -354,7 +354,7 @@ def test_query_text_for_recall_handles_every_message_shape():
 
 def test_multimodal_turn_still_selects_rules():
     """End of the chain: a list-shaped message must reach rule selection."""
-    from agent.turn_context import query_text_for_recall as q
+    from agent.turn_context import _memory_query_text as q
     content = [{"type": "text", "text": "the ledger scorecard looks wrong"},
                {"type": "image_url", "image_url": {}}]
     hot, deferred = select(SAMPLE, TurnContext(query=q(content)))
