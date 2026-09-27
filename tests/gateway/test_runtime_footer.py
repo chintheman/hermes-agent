@@ -259,6 +259,13 @@ def test_default_build_footer_line_ignores_turn_seconds(monkeypatch):
     assert with_timing == baseline
 
 
+# Frozen copy of the fork's default field set. Upstream restructured this file in
+# v0.21.5 and dropped the definition while keeping the assertions that read it, so it
+# is restored here — the point of the constant is to pin the legacy default set, and a
+# second reference to _DEFAULT_FIELDS itself would make the test tautological.
+_LEGACY_DEFAULT_FIELDS = ["model", "context_pct", "cwd"]
+
+
 def test_rate_tier_not_in_default_fields():
     """rate_tier is opt-in — default field set stays byte-identical."""
     from gateway.runtime_footer import _DEFAULT_FIELDS
