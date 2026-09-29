@@ -90,13 +90,23 @@ PRIORITIZE: corrections (user pushed back on agent behavior) — highest priorit
 
 
 def extract_observations(transcript: str, model: str = DEFAULT_MODEL) -> List[Dict[str, Any]]:
-    """Run observer LLM pass over a transcript. Returns parsed observations list."""
+    """Run observer LLM pass over a transcript. Returns parsed observations list.
+
+    loop_model is a reasoning model (same class documented in
+    hotcore_consolidate.py's HOTCORE_MODEL comment: it burns its completion
+    budget on reasoning_tokens before emitting any visible content). 2026-09-29
+    incident: 2000 max_tokens and the 60s default timeout left ~99% of observer
+    calls truncated to a bare "[" (reasoning ate the budget, content barely
+    started) plus a smaller share of outright timeouts. 8000 tokens / 180s
+    match the values hotcore_consolidate.py already proved necessary for this
+    model class on this API.
+    """
     messages = [
         {"role": "system", "content": OBSERVER_SYSTEM_PROMPT},
         {"role": "user", "content": f"Extract durable observations from this conversation:\n\n{transcript}"},
     ]
 
-    response = call_llm(messages, model=model, max_tokens=2000, temperature=0.3)
+    response = call_llm(messages, model=model, max_tokens=8000, temperature=0.3, timeout=180)
     if not response:
         return []
 
@@ -114,5 +124,22 @@ def extract_observations(transcript: str, model: str = DEFAULT_MODEL) -> List[Di
             return observations
         return []
     except json.JSONDecodeError:
-        logger.warning("Observer LLM returned unparseable JSON: %s...", response[:200])
-        return []
+        pass
+
+    # Tolerate a leading prose preamble ("I'll extract durable observations...")
+    # or stray punctuation before/after the array by pulling out the first
+    # complete JSON array in the text before giving up. A response truncated
+    # mid-array (no closing "]") still fails here and is correctly reported —
+    # that is a token-budget problem, not a formatting one.
+    start = response.find("[")
+    end = response.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            observations = json.loads(response[start:end + 1])
+            if isinstance(observations, list):
+                return observations
+        except json.JSONDecodeError:
+            pass
+
+    logger.warning("Observer LLM returned unparseable JSON: %s...", response[:200])
+    return []
