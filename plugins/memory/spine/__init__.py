@@ -111,8 +111,13 @@ def _root_spine_config() -> bool | None:
         spine = ((data.get("memory") or {}) if isinstance(data, dict) else {}).get("spine") or {}
         if isinstance(spine, dict) and "observer_enabled" in spine:
             return bool(spine["observer_enabled"])
-    except Exception:
-        pass
+    except Exception as exc:
+        # Returning None here lets the caller default to ON, so a broken root config
+        # must leave a trace — this is the "root says off, pass runs anyway" case.
+        logger.warning(
+            "Spine observer: root config unreadable (%s: %s) — switch falls back to ON",
+            type(exc).__name__, exc,
+        )
     return None
 
 

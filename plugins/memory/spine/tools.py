@@ -633,30 +633,9 @@ def handle_explain(args: Dict[str, Any], config: SpineConfig) -> str:
     # observations.contradicts and nowhere else, so tracing a contradiction means asking
     # the database. Without this leg, explain() reading only the history could never
     # report one, however the comparison above is spelled.
-    try:
-        idx = _get_index(config)
-        try:
-            rows = idx.conn.execute(
-                "SELECT id, content FROM observations "
-                "WHERE contradicts LIKE ? AND id != ?",
-                (f"%{obs_id[:8]}%", obs_id),
-            ).fetchall()
-        finally:
-            idx.close()
-        seen_rids = {e.get("contradictor_id") for e in timeline}
-        for cid, ccontent in rows:
-            if cid in seen_rids:
-                continue          # already reported from the history pass
-            timeline.append({
-                "event": "contradicted_by",
-                "ts": "",
-                "contradictor_id": cid,
-                "contradictor_content": (ccontent or "")[:120],
-                "source": "observations.contradicts",
-            })
-    except Exception:
-        pass          # a missing index must not turn explain() into an error
-
+    # Resolve a prefix / unknown id BEFORE the database leg: that leg can add events for
+    # an id the history has never seen, which would otherwise skip this fallback and
+    # return an empty current_state instead of resolving the prefix or erroring.
     if not found_original and not timeline:
         # Try prefix match
         for rec in all_records:
@@ -668,6 +647,34 @@ def handle_explain(args: Dict[str, Any], config: SpineConfig) -> str:
             "error": f"No observation found for id or prefix '{obs_id}'",
             "hint": "Use recall() to find observation IDs, then explain(id) to trace their history.",
         })
+
+    try:
+        idx = _get_index(config)
+        try:
+            # Exact element match on the JSON list — a LIKE would treat % and _ in the
+            # id as wildcards. Rows with '' (never-initialised) are skipped by json_valid.
+            rows = idx.conn.execute(
+                "SELECT id, content, created_at FROM observations "
+                "WHERE json_valid(contradicts) AND id != ? AND EXISTS ("
+                "SELECT 1 FROM json_each(observations.contradicts) WHERE value IN (?, ?))",
+                (obs_id, obs_id, obs_id[:8]),
+            ).fetchall()
+        finally:
+            idx.close()
+        seen_rids = {e.get("contradictor_id") for e in timeline}
+        for cid, ccontent, cts in rows:
+            if cid in seen_rids:
+                continue          # already reported from the history pass
+            timeline.append({
+                "event": "contradicted_by",
+                "ts": cts or "",
+                "contradictor_id": cid,
+                "contradictor_content": (ccontent or "")[:120],
+                "source": "observations.contradicts",
+            })
+    except Exception as exc:
+        # A missing index must not turn explain() into an error, but say so.
+        logger.debug("explain(): contradiction lookup skipped (%s: %s)", type(exc).__name__, exc)
 
     # --- Phase 2: build summary ---
     timeline.sort(key=lambda e: e.get("ts", ""))
