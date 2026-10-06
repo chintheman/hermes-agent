@@ -1276,8 +1276,10 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
         and "memory" not in (agent.disabled_toolsets or [])
     )
     if not skip_memory or _memory_toolset_requested:
-        # Memory is optional — don't break agent init
-        with suppress(Exception):
+        # Memory is optional — don't break agent init. But never silently: on 2026-09-27 a
+        # merge made MemoryStore() raise here and agents ran without MEMORY.md / USER.md for
+        # 9 days with nothing in any log.
+        try:
             from tools.memory_tool import (
                 MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags,
             )
@@ -1298,6 +1300,10 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
                     scope_filter=bool(mem_config.get("scope_filter", False)),
                 )
                 agent._memory_store.load_from_disk()
+        except Exception as _mem_exc:
+            agent._memory_store = None
+            logger.error("Built-in memory (MEMORY.md / USER.md) failed to load; this agent runs "
+                         "WITHOUT its hot core: %s: %s", type(_mem_exc).__name__, _mem_exc)
 
     # External memory provider plugin (one at a time, alongside built-in): memory.provider.
     agent._memory_manager = None

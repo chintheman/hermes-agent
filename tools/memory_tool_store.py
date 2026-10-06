@@ -195,8 +195,13 @@ class MemoryStore:
     _MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
 
     def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375, *,
-                 memory_enabled: bool = True, user_profile_enabled: bool = True):
+                 memory_enabled: bool = True, user_profile_enabled: bool = True,
+                 scope_filter: bool = False):
         self.memory_entries: List[str] = []
+        # hotcore-retrieval-split phase 4 (fork, 5f512ab215). Re-ported 2026-10-06: the
+        # v0.21.5 merge dropped this parameter, agent_init's suppress(Exception) swallowed
+        # the TypeError, and every agent ran with NO hot core for 9 days.
+        self.scope_filter = scope_filter
         self.user_entries: List[str] = []
         self.memory_char_limit, self.user_char_limit = memory_char_limit, user_char_limit
         self.memory_enabled, self.user_profile_enabled = memory_enabled, user_profile_enabled
@@ -259,7 +264,38 @@ class MemoryStore:
                 logger.warning("%s exceeds its char limit on load: %d/%d chars. Entries stay loaded; "
                                "further additions are blocked until it is back under the limit.",
                                path.name, count, limit)
-            self._system_prompt_snapshot[target] = self._render_block(target, [_sanitize(e, path.name) for e in entries])
+            sanitized = [_sanitize(e, path.name) for e in entries]
+            # Trigger scoping: @when:-tagged entries leave the SNAPSHOT only; spine's
+            # prefetch() delivers them into the turn that needs them. Live entries are
+            # untouched, so writes and save_to_disk still see the whole file. Filtered
+            # once at build (the snapshot is frozen for the prefix cache). Fails OPEN:
+            # a missing rule is invisible, an extra one only costs tokens.
+            if target == "memory" and self.scope_filter:
+                try:
+                    sanitized = self._scope_filter_entries(sanitized)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Hot-core scope filter failed, loading every entry: %s", exc)
+            self._system_prompt_snapshot[target] = self._render_block(target, sanitized)
+
+    @staticmethod
+    def _scope_filter_entries(entries: List[str]) -> List[str]:
+        """Keep entries the frozen snapshot must carry; defer only what prefetch() can deliver."""
+        import sys as _sys
+        _plugins = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "plugins", "memory")
+        if _plugins not in _sys.path:
+            _sys.path.insert(0, _plugins)
+        from spine.rule_scope import snapshot_keep
+
+        # snapshot_keep(), not an empty-context select() (d378f92b4e): a block may only leave
+        # the snapshot if something can deliver it back. Universal entries, [R] rules and any
+        # trigger kind without a delivery path all stay.
+        hot = snapshot_keep(entries)
+        deferred = [e for e in entries if e not in hot]
+        if deferred:
+            logger.info("Hot-core scope filter: %d entries deferred to prefetch, %d kept",
+                        len(deferred), len(hot))
+        return hot
 
     @staticmethod
     @contextmanager

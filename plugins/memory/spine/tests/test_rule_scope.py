@@ -223,8 +223,12 @@ def test_scope_filter_never_shrinks_what_gets_persisted(tmp_path, monkeypatch):
 
     # ... but live state is whole, and so is anything persisted from it.
     assert len(store.memory_entries) == len(blocks)
-    store.save_to_disk("memory")
+    # save_to_disk() was removed upstream (v0.21.5); every write now goes through
+    # _mutate(). Drive a REAL write path so the check covers what actually persists.
+    res = store.add("memory", "[C] new note written after load")
+    assert res.get("success"), res
     on_disk = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+    assert "new note written after load" in on_disk
     for b in blocks:
         assert b in on_disk, f"scope filter destroyed {b!r} on disk"
 
