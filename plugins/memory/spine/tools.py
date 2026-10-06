@@ -612,13 +612,50 @@ def handle_explain(args: Dict[str, Any], config: SpineConfig) -> str:
                 "replacement_id": rid,
                 "replacement_content": rec.get("content", "")[:120],
             })
-        if obs_id in (rec.get("contradicts") or []):
+        # Contradiction links are stored as 8-char id PREFIXES — loops.py writes
+        # `a_id[:8]` / `b_id[:8]` — and this compared them against a FULL id, so it
+        # matched nothing and explain() has never reported a single contradiction since
+        # the store was created. Measured 2026-10-04: 276 stored refs, every one exactly
+        # 8 characters, and not one equal to any id in the table. Both spellings are
+        # accepted here because a future writer may store the full id.
+        evidence = rec.get("contradicts") or []
+        if obs_id in evidence or obs_id[:8] in evidence:
             timeline.append({
                 "event": "contradicted_by",
                 "ts": rec.get("created_at", rec.get("ts", "")),
                 "contradictor_id": rid,
                 "contradictor_content": rec.get("content", "")[:120],
             })
+
+    # Contradictions are NOT in the JSONL. Measured 2026-10-04: 16,110 history records,
+    # every one carrying `contradicts: []` or None — zero non-empty — while the database
+    # holds 276 contradiction links. The resolution pass in loops.py writes them to
+    # observations.contradicts and nowhere else, so tracing a contradiction means asking
+    # the database. Without this leg, explain() reading only the history could never
+    # report one, however the comparison above is spelled.
+    try:
+        idx = _get_index(config)
+        try:
+            rows = idx.conn.execute(
+                "SELECT id, content FROM observations "
+                "WHERE contradicts LIKE ? AND id != ?",
+                (f"%{obs_id[:8]}%", obs_id),
+            ).fetchall()
+        finally:
+            idx.close()
+        seen_rids = {e.get("contradictor_id") for e in timeline}
+        for cid, ccontent in rows:
+            if cid in seen_rids:
+                continue          # already reported from the history pass
+            timeline.append({
+                "event": "contradicted_by",
+                "ts": "",
+                "contradictor_id": cid,
+                "contradictor_content": (ccontent or "")[:120],
+                "source": "observations.contradicts",
+            })
+    except Exception:
+        pass          # a missing index must not turn explain() into an error
 
     if not found_original and not timeline:
         # Try prefix match

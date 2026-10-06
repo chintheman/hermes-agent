@@ -97,6 +97,75 @@ def _scope_filter_enabled() -> bool:
         return False
 
 
+def _root_spine_config() -> bool | None:
+    """observer_enabled from the INSTALL's own config, whatever scope is bound.
+
+    Path.home()/.hermes/config.yaml, deliberately not get_hermes_home(): the entire
+    point is to reach a config the bound profile scope cannot see.
+    """
+    try:
+        import yaml  # type: ignore
+        from pathlib import Path
+
+        data = yaml.safe_load((Path.home() / ".hermes" / "config.yaml").read_text()) or {}
+        spine = ((data.get("memory") or {}) if isinstance(data, dict) else {}).get("spine") or {}
+        if isinstance(spine, dict) and "observer_enabled" in spine:
+            return bool(spine["observer_enabled"])
+    except Exception:
+        pass
+    return None
+
+
+def _observer_enabled() -> bool:
+    """Read memory.spine.observer_enabled from the live Hermes config.
+
+    Defaults to True — this flag exists so the pass can be turned OFF, and it is
+    read fresh each session end for the same reason _scope_filter_enabled() is
+    (a stale process-global read makes a flag look broken).
+
+    Why the opt-out exists (measured 2026-10-04, ~/.hermes/memory.db):
+    7,476 observations written, 28 ever retrieved (0.4% read rate), 5,350 rows
+    already superseded or demoted, and 7 reached MEMORY.md — a 0.33% yield. The
+    pass spends one LLM call per session end to feed a store the agent does not
+    read. Set memory.spine.observer_enabled: false to stop that; unset or true
+    restores the previous behaviour exactly.
+
+    PROFILE FALLBACK, added 2026-10-04 after review. `load_config_readonly()`
+    resolves through whatever HERMES_HOME is bound to, and a profile home carries
+    no `memory.spine` block — so under a profile-scoped session end this read
+    returned the *default* True and the switch quietly did nothing. Measured live:
+    HERMES_HOME=profiles/librarian -> observer_enabled True, while the root config
+    says false. The store this gate protects is the single root-owned
+    ~/.hermes/memory.db that every profile shares, so the switch governing it cannot
+    be profile-local: a profile that sets the key itself still wins (its value is
+    read first), otherwise the root config decides. This is deliberately NOT general
+    config inheritance — it is one flag, for one shared resource.
+    """
+    try:
+        from hermes_cli.config import cfg_get, load_config_readonly
+
+        cfg = load_config_readonly()
+        spine = cfg_get(cfg, "memory", "spine", default=None)
+        if isinstance(spine, dict) and "observer_enabled" in spine:
+            return bool(spine["observer_enabled"])
+        root = _root_spine_config()
+        if root is not None:
+            return root
+        return True
+    except Exception as exc:
+        # Fail OPEN — preserve prior behaviour — but never SILENTLY. A read that raises
+        # is otherwise indistinguishable from a config that says "on", and the pass's
+        # only output is the absence of a message. Measured 2026-10-04: the switch read
+        # off for 25 minutes while the observer wrote 24 observations and 2 episodes,
+        # and nothing anywhere said the setting had not taken effect.
+        logger.warning(
+            "Spine observer switch unreadable (%s: %s) — defaulting to ON, so the pass "
+            "WILL run. Fix memory.spine.observer_enabled or the config loader.",
+            type(exc).__name__, exc,
+        )
+        return True
+
+
 class SpineProvider(MemoryProvider):
     """Hermes Memory v2 — "The Sleeping Brain" provider."""
 
@@ -280,9 +349,24 @@ class SpineProvider(MemoryProvider):
         self._turn_number = 0
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        """Observer pass — extract durable observations (spec §5.1)."""
+        """Observer pass — extract durable observations (spec §5.1).
+
+        Gated by memory.spine.observer_enabled (default True, so this is a no-op
+        unless the flag is explicitly turned off). See _observer_enabled() for the
+        2026-10-04 measurements that motivated the opt-out.
+        """
+        if not _observer_enabled():
+            logger.info("Spine observer disabled by config — session end extracted nothing")
+            return
         from .loops import run_observer
 
+        # The pass's own heartbeat, logged whether or not it finds anything durable.
+        # Added 2026-10-04 after review: the only line written was "wrote episode", so a
+        # pass that ran and produced nothing — a quiet session, or a broken extraction —
+        # left no trace at all, and the audit's switch check could not tell "asked and
+        # declined" from "never asked". One INFO per session end is the cheapest thing
+        # that makes the gate observable.
+        logger.info("Spine observer gate open — session end reached the pass")
         run_observer(messages, config=self._config)
 
     def on_memory_write(
