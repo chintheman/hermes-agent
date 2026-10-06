@@ -280,12 +280,9 @@ class MemoryStore:
     @staticmethod
     def _scope_filter_entries(entries: List[str]) -> List[str]:
         """Keep entries the frozen snapshot must carry; defer only what prefetch() can deliver."""
-        import sys as _sys
-        _plugins = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                "plugins", "memory")
-        if _plugins not in _sys.path:
-            _sys.path.insert(0, _plugins)
-        from spine.rule_scope import snapshot_keep
+        # Package import, deliberately NOT a sys.path insert of plugins/memory: that would make
+        # plugin dirs (honcho, mem0, ...) shadow the pip SDKs of the same name process-wide.
+        from plugins.memory.spine.rule_scope import snapshot_keep
 
         # snapshot_keep(), not an empty-context select() (d378f92b4e): a block may only leave
         # the snapshot if something can deliver it back. Universal entries, [R] rules and any
