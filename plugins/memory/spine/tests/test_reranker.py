@@ -84,3 +84,25 @@ def test_demoted_row_ranks_below_an_identical_active_row(tmp_path):
     finally:
         idx.close()
     assert hits.index("B_ACTIVE") < hits.index("A_DEMOTED"), hits
+
+
+def test_failed_load_is_retried_after_the_backoff(monkeypatch):
+    calls = []
+
+    class Fake:
+        def __init__(self, *a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("transient download failure")
+
+    import types
+    monkeypatch.setitem(sys.modules, "sentence_transformers",
+                        types.SimpleNamespace(CrossEncoder=Fake))
+    monkeypatch.setattr(reranker, "_model", None)
+    monkeypatch.setattr(reranker, "_failed_at", 0.0)
+    clock = [1000.0]
+    monkeypatch.setattr(reranker.time, "monotonic", lambda: clock[0])
+    assert reranker._load("m") is None            # first load fails
+    assert reranker._load("m") is None and len(calls) == 1   # inside backoff: no retry
+    clock[0] += reranker._RETRY_AFTER_S + 1
+    assert reranker._load("m") is not None and len(calls) == 2  # retried and recovered

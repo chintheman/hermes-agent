@@ -17,31 +17,34 @@ the pre-prune store, ~0.7s per query at pool 50 on the M1. Pool 30 is too small
 (the answer sat at 33).
 
 Fails OPEN: if the model cannot load or predict, recall returns the hybrid order
-unchanged and logs a warning once.
+unchanged and logs a warning. A failed load is retried after 5 minutes.
 """
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-_RRF_K = 61          # matches search_hybrid's fusion constant
+_RRF_K = 61          # matches search_hybrid's 1/(rank + 61) fusion
+_RETRY_AFTER_S = 300 # a failed load is retried, not latched for the process lifetime
 _MAX_CHARS = 2000    # the model truncates at 512 tokens anyway
 
 _model: Any = None
 _model_name: Optional[str] = None
-_failed = False
-_lock = threading.Lock()
+_failed_at = 0.0
+_lock = threading.Lock()          # guards loading
+_predict_lock = threading.Lock()  # one predict at a time on the shared torch model
 
 
 def _load(name: str) -> Any:
-    global _model, _model_name, _failed
+    global _model, _model_name, _failed_at
     if _model is not None and _model_name == name:
         return _model
-    if _failed:
+    if _failed_at and time.monotonic() - _failed_at < _RETRY_AFTER_S:
         return None
     with _lock:
         if _model is not None and _model_name == name:
@@ -51,11 +54,13 @@ def _load(name: str) -> Any:
 
             _model = CrossEncoder(name, max_length=512)
             _model_name = name
+            _failed_at = 0.0
             logger.info("Spine re-ranker loaded: %s", name)
         except Exception as exc:  # noqa: BLE001
-            _failed = True
-            logger.warning("Spine re-ranker unavailable (%s: %s); recall uses hybrid order",
-                           type(exc).__name__, exc)
+            _failed_at = time.monotonic()
+            logger.warning("Spine re-ranker unavailable (%s: %s); recall uses hybrid order, "
+                           "retrying the load in %ds",
+                           type(exc).__name__, exc, _RETRY_AFTER_S)
             return None
     return _model
 
@@ -75,8 +80,9 @@ def rerank(query: str, candidates: List[Dict[str, Any]],
     if model is None:
         return candidates
     try:
-        scores = model.predict([(query, _text(r)) for r in candidates],
-                               batch_size=32, show_progress_bar=False)
+        with _predict_lock:
+            scores = model.predict([(query, _text(r)) for r in candidates],
+                                   batch_size=32, show_progress_bar=False)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Spine re-ranker failed (%s: %s); using hybrid order",
                        type(exc).__name__, exc)
