@@ -286,7 +286,7 @@ def handle_remember(args: Dict[str, Any], config: SpineConfig) -> str:
                     for rec in existing:
                         if rec.get("id") == existing_rec["id"] and "patch" in rec:
                             merged.update(rec["patch"])
-                    merged["confirmations"] = existing_rec.get("confirmations", 1) + 1
+                    merged["confirmations"] = merged.get("confirmations", 1) + 1
                     merged["last_confirmed"] = now
                     emb = None
                     if embedder_available():
