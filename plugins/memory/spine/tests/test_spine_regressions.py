@@ -790,3 +790,36 @@ def test_promote_to_hotcore_actually_calls_the_dedupe(monkeypatch):
     assert loops._promote_to_hotcore("obs2", novel, "fact", None) == "written"
     assert novel in open(f, encoding="utf-8").read()
     os.remove(f)
+
+
+def test_remember_dedupe_reindexes_a_row_missing_from_the_db(monkeypatch):
+    """A fact in the history but deleted from the database must come back on re-remember.
+
+    The 2026-10-04 prune deleted rows the JSONL history kept. remember() deduped
+    against the history, ran an UPDATE that touched zero rows, and reported success,
+    so sync_hotcore "imported" the same 4 hot-core blocks every night while they
+    stayed unsearchable.
+    """
+    from spine import tools as spine_tools
+    from spine.tools import handle_remember, _get_index
+    from spine.config import SpineConfig
+    monkeypatch.setattr(spine_tools, "embedder_available", lambda: False)
+    root = tempfile.mkdtemp()
+    cfg = SpineConfig(canonical_root=root, db=os.path.join(root, "m.db"))
+    text = "Zebra-crossing quokkas prefer the M4 laptop on Tuesdays"
+    first = json.loads(handle_remember({"content": text}, cfg))
+    assert first.get("success"), first
+
+    idx = _get_index(cfg)
+    idx.conn.execute("DELETE FROM observations WHERE id=?", (first["id"],))
+    idx.conn.commit()
+    idx.close()
+
+    again = json.loads(handle_remember({"content": text}, cfg))
+    assert again.get("deduplicated") and again["id"] == first["id"], again
+    con = sqlite3.connect(cfg.db)
+    row = con.execute("SELECT content, confirmations FROM observations WHERE id=?",
+                      (first["id"],)).fetchone()
+    con.close()
+    assert row is not None, "dedupe confirmed a row that no longer exists"
+    assert row[0] == text and row[1] == 2

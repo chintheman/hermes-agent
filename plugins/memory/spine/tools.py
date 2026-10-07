@@ -272,10 +272,29 @@ def handle_remember(args: Dict[str, Any], config: SpineConfig) -> str:
             # Update index
             try:
                 idx = _get_index(config)
-                idx.conn.execute(
+                cur = idx.conn.execute(
                     "UPDATE observations SET confirmations=?, last_confirmed=? WHERE id=?",
                     (existing_rec.get("confirmations", 1) + 1, now, existing_rec["id"]),
                 )
+                if cur.rowcount == 0:
+                    # The history still has this record but the database row is gone
+                    # (the 2026-10-04 prune deleted rows the JSONL kept). Confirming a
+                    # row that does not exist left the fact unsearchable while reporting
+                    # success — sync_hotcore "imported" the same 4 blocks every night.
+                    # Re-index it from its replayed history instead.
+                    merged = dict(existing_rec)
+                    for rec in existing:
+                        if rec.get("id") == existing_rec["id"] and "patch" in rec:
+                            merged.update(rec["patch"])
+                    merged["confirmations"] = existing_rec.get("confirmations", 1) + 1
+                    merged["last_confirmed"] = now
+                    emb = None
+                    if embedder_available():
+                        try:
+                            emb = embed_single(merged.get("content", ""))
+                        except Exception:
+                            pass
+                    idx.upsert_observation(merged, emb)
                 idx.conn.commit()
                 idx.close()
             except Exception as e:
