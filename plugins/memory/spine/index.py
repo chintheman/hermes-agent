@@ -241,6 +241,13 @@ def _entity_match_boost(query_words: set, row: Dict[str, Any], boost: float = 1.
 DEFAULT_K = 25
 
 SEARCHABLE_STATUSES = ("active", "promoted", "demoted")
+
+# Demoted rows stay searchable (consolidation judged them lower value, not wrong;
+# sync_hotcore's hot-core copies are demoted on purpose) but rank below active ones.
+# Measured 2026-10-07 after restoring 2,544 demoted rows the 10-04 prune had deleted:
+# every value 0.5-0.85 gave eval 29/29 and benchmark controls 3/5 on both the current
+# and the pre-prune store (1.0 gave 28/29 on the current one). 0.7 is the middle.
+DEMOTED_WEIGHT = 0.7
 _STATUS_PLACEHOLDERS = ",".join("?" * len(SEARCHABLE_STATUSES))
 
 # How long a connection waits on a busy lock before raising "database is
@@ -744,7 +751,8 @@ class MemoryIndex:
         return merged
 
     def search_hybrid(
-        self, query: str, query_embedding: Optional[List[float]], profile: str = "agent:main", k: int = DEFAULT_K
+        self, query: str, query_embedding: Optional[List[float]], profile: str = "agent:main", k: int = DEFAULT_K,
+        rerank_pool: int = 0, rerank_model: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Hybrid FTS5 + vector search with Reciprocal Rank Fusion and recency weighting.
 
@@ -793,9 +801,17 @@ class MemoryIndex:
             if row.get("source") == "wiki":
                 continue  # Wiki chunks get neutral recency (1.0)
             scores[obs_id] = scores.get(obs_id, 0) * recency_factor(row)
+            if row.get("status") == "demoted":
+                scores[obs_id] *= DEMOTED_WEIGHT
             scores[obs_id] = scores.get(obs_id, 0) * _entity_match_boost(query_words, row)
 
         ranked = sorted(merged.items(), key=lambda item: scores.get(item[0], 0), reverse=True)
+        if rerank_pool and rerank_pool > 0:
+            # Second pass (reranker.py): re-order the top candidates with a cross-encoder.
+            # Off unless memory.spine.rerank_pool > 0; fails open to this order.
+            from .reranker import rerank
+            top = [row for _, row in ranked[:max(k, rerank_pool)]]
+            return rerank(query, top, rerank_model)[:k]
         return [row for _, row in ranked[:k]]
 
     def _wiki_vectors(self) -> Tuple[List[str], List[Any]]:

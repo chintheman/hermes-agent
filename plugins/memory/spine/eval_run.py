@@ -77,6 +77,16 @@ def run(profile: str = "*") -> Dict[str, Any]:
     idx = MemoryIndex(DB)
     idx.open()
 
+    # Score what recall actually serves: the same re-rank setting as production
+    # (memory.spine.rerank_pool). Evaluating the bare hybrid order while recall
+    # re-ranks would grade a path nobody uses.
+    try:
+        from spine.config import load_spine_config
+        _cfg = load_spine_config()
+        rerank_pool, rerank_model = _cfg.rerank_pool, _cfg.rerank_model
+    except Exception:  # noqa: BLE001
+        rerank_pool, rerank_model = 0, None
+
     have_embedder = embedder.embedder_available()
     results: List[Dict[str, Any]] = []
 
@@ -87,7 +97,8 @@ def run(profile: str = "*") -> Dict[str, Any]:
         t_embed = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        hits = idx.search_hybrid(q, qvec or None, profile=profile, k=k)
+        hits = idx.search_hybrid(q, qvec or None, profile=profile, k=k,
+                                 rerank_pool=rerank_pool, rerank_model=rerank_model)
         t_search = time.perf_counter() - t0
 
         verdict = judge(case, hits)

@@ -29,6 +29,8 @@ class SpineConfig:
     recency_half_life_hours: float = 168  # 7-day half-life for recency weighting
     recency_weight: float = 0.15           # contribution of recency to final score
     episode_compact_days: int = 90
+    rerank_pool: int = 0                   # >0: cross-encoder re-ranks this many hybrid candidates
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     hermes_home: str = "~/.hermes"
 
 
@@ -69,6 +71,8 @@ def load_spine_config(hermes_home: str = "") -> SpineConfig:
         cfg.episode_compact_days = int(spine.get("episode_compact_days", cfg.episode_compact_days))
         cfg.recency_half_life_hours = float(spine.get("recency_half_life_hours", cfg.recency_half_life_hours))
         cfg.recency_weight = float(spine.get("recency_weight", cfg.recency_weight))
+        cfg.rerank_pool = int(spine.get("rerank_pool", cfg.rerank_pool) or 0)
+        cfg.rerank_model = spine.get("rerank_model", cfg.rerank_model) or cfg.rerank_model
 
     # Resolve paths
     cfg.canonical_root = _resolve_path(cfg.canonical_root, cfg.hermes_home)

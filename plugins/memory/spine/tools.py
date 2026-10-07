@@ -348,7 +348,8 @@ def handle_recall(args: Dict[str, Any], config: SpineConfig) -> str:
         except Exception:
             pass
 
-    results = idx.search_hybrid(query, query_embedding, profile=profile, k=k)
+    results = idx.search_hybrid(query, query_embedding, profile=profile, k=k,
+                                rerank_pool=config.rerank_pool, rerank_model=config.rerank_model)
 
     # Touch last_retrieved
     now = _now_iso()
@@ -409,7 +410,8 @@ def handle_reflect(args: Dict[str, Any], config: SpineConfig) -> str:
         except Exception:
             pass
 
-    results = idx.search_hybrid(query, query_embedding, profile=profile, k=25)
+    results = idx.search_hybrid(query, query_embedding, profile=profile, k=25,
+                                rerank_pool=config.rerank_pool, rerank_model=config.rerank_model)
     idx.close()
 
     if not results:
