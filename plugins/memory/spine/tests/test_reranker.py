@@ -106,3 +106,31 @@ def test_failed_load_is_retried_after_the_backoff(monkeypatch):
     assert reranker._load("m") is None and len(calls) == 1   # inside backoff: no retry
     clock[0] += reranker._RETRY_AFTER_S + 1
     assert reranker._load("m") is not None and len(calls) == 2  # retried and recovered
+
+
+def test_warm_up_runs_once_in_the_background(monkeypatch):
+    import threading as _th
+    import spine as spine_mod
+    from spine.config import SpineConfig
+
+    started = []
+
+    class FakeThread:
+        def __init__(self, target, name, daemon):
+            assert daemon, "warm-up must never keep the process alive"
+            self.target = target
+        def start(self):
+            started.append(self.target)
+
+    monkeypatch.setattr(spine_mod, "_warm_started", False)
+    monkeypatch.setattr(spine_mod.threading, "Thread", FakeThread)
+    loaded = []
+    monkeypatch.setattr(reranker, "_load", lambda name: loaded.append(name))
+    import spine.embedder as emb
+    monkeypatch.setattr(emb, "embedder_available", lambda: True)
+    cfg = SpineConfig(rerank_pool=50)
+    spine_mod._warm_models_once(cfg)
+    spine_mod._warm_models_once(cfg)           # second session: no second thread
+    assert len(started) == 1
+    started[0]()                               # run the body synchronously
+    assert loaded == [cfg.rerank_model]

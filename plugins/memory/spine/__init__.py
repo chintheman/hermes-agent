@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -171,6 +172,41 @@ def _observer_enabled() -> bool:
         return True
 
 
+_warm_started = False
+_warm_lock = threading.Lock()
+
+
+def _warm_models_once(config) -> None:
+    """Load the embedder and (if enabled) the re-ranker in a background thread, once
+    per process.
+
+    Measured 2026-10-07: the first recall after a gateway restart took 20.9s while
+    both models loaded on demand; the next took 0.55s. Warming at the first session
+    init moves that cost off the user's first recall. Daemon thread, never blocks
+    init, never raises: a failed warm just leaves the on-demand load in place.
+    """
+    global _warm_started
+    with _warm_lock:
+        if _warm_started:
+            return
+        _warm_started = True
+
+    def _run() -> None:
+        t0 = time.monotonic()
+        try:
+            from .embedder import embedder_available
+            embedder_available()
+            if getattr(config, "rerank_pool", 0) > 0:
+                from .reranker import _load
+                _load(config.rerank_model)
+            logger.info("Spine models warmed in %.1fs", time.monotonic() - t0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Spine model warm-up failed (%s: %s); loading on demand",
+                           type(exc).__name__, exc)
+
+    threading.Thread(target=_run, name="spine-warm", daemon=True).start()
+
+
 class SpineProvider(MemoryProvider):
     """Hermes Memory v2 — "The Sleeping Brain" provider."""
 
@@ -193,6 +229,7 @@ class SpineProvider(MemoryProvider):
         self._session_id = session_id
         self._config = load_spine_config(kwargs.get("hermes_home", ""))
         logger.info("Spine initialized — session=%s", session_id)
+        _warm_models_once(self._config)
 
     def system_prompt_block(self) -> str:
         """Spine contributes no static system prompt text."""
