@@ -381,6 +381,9 @@ DEFAULT_CONFIG = {
         # keyless ring; the next call tries the chosen backend again (no sticky failover). Off when
         # keyless_fallback is false.
         "keyless_rescue": True,
+        # Ordered backends web_search tries after the chosen one fails, before the keyless rescue
+        # (e.g. [exa, keenable, parallel]). Empty = straight to the rescue.
+        "search_fallbacks": [],
         # Per-vendor tier for vendors with both a keyless free endpoint and a keyed paid path (exa,
         # parallel, firecrawl, keenable; tavily is opt-in keyless via `hermes tools`, not a ring
         # member). Set by the `hermes tools` picker. "free" = always anonymous endpoint even with a
