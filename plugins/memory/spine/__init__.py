@@ -299,18 +299,27 @@ class SpineProvider(MemoryProvider):
         """Rules this turn needs that the frozen snapshot does not already hold."""
         from .rule_scope import TurnContext, deliverable, split_blocks
 
-        hotcore = os.path.expanduser("~/.hermes/memories/MEMORY.md")
-        if not os.path.exists(hotcore):
-            return ""
-        with open(hotcore, encoding="utf-8", errors="ignore") as fh:
-            blocks = split_blocks(fh.read())
-        extra = deliverable(blocks, TurnContext(query=query or "",
-                                                tool_name=tool_name,
-                                                has_image=has_image))
-        if not extra:
-            return ""
-        body = "\n".join(f"- {b}" for b in extra)
-        return ("[MEMORY — rules relevant to this turn]\n" + body)
+        try:
+            from hermes_constants import get_hermes_home
+            mem_dir = os.path.join(str(get_hermes_home()), "memories")
+        except Exception:  # noqa: BLE001
+            mem_dir = os.path.expanduser("~/.hermes/memories")
+        ctx = TurnContext(query=query or "", tool_name=tool_name, has_image=has_image)
+        sections = []
+        # MEMORY.md and USER.md are both filtered out of the frozen snapshot when
+        # memory.scope_filter is on, so both must be searched here or a tagged
+        # USER.md entry would be in no prompt at all.
+        for fname, title in (("MEMORY.md", "[MEMORY — rules relevant to this turn]"),
+                             ("USER.md", "[USER PROFILE — facts relevant to this turn]")):
+            path = os.path.join(mem_dir, fname)
+            if not os.path.exists(path):
+                continue
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                blocks = split_blocks(fh.read())
+            extra = deliverable(blocks, ctx)
+            if extra:
+                sections.append(title + "\n" + "\n".join(f"- {b}" for b in extra))
+        return "\n\n".join(sections)
 
     # Shadow-mode instrumentation ---------------------------------------
 

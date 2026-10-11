@@ -270,7 +270,8 @@ class MemoryStore:
             # untouched, so writes and save_to_disk still see the whole file. Filtered
             # once at build (the snapshot is frozen for the prefix cache). Fails OPEN:
             # a missing rule is invisible, an extra one only costs tokens.
-            if target == "memory" and self.scope_filter:
+            # Applies to USER.md as well as MEMORY.md: spine's prefetch() reads both files.
+            if self.scope_filter:
                 try:
                     sanitized = self._scope_filter_entries(sanitized)
                 except Exception as exc:  # noqa: BLE001
