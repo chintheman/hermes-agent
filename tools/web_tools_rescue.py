@@ -132,3 +132,70 @@ def _rescue_extract(provider_name: str, urls: list, results: list) -> list:
         replacements = dict(zip(rescue_idx, rescued))
         return [replacements.get(i, r) for i, r in enumerate(results)]
     return rescued
+
+
+# --- Opt-in configured failover: ``web.search_fallbacks: [name, ...]`` -------------------------------
+# Unset/empty => no behaviour change. Tried BEFORE the keyless-ring rescue. "No results" is a success
+# (success=True, empty list) and never reaches here; only provider errors are classified.
+_FAILOVER_MARKERS = (
+    # payment / quota
+    "payment required", "insufficient credit", "out of credits", "quota", "402", "429", "rate limit",
+    "too many requests", "usage limit", "billing",
+    # auth
+    "unauthorized", "forbidden", "401", "403", "invalid api key", "api key", "not set", "authentication",
+    # transient
+    "timed out", "timeout", "connection", "temporarily", "unavailable", "502", "503", "504", "500",
+    "bad gateway", "reset by peer",
+)
+
+
+def _failover_class(error: str) -> str:
+    """'quota' | 'auth' | 'transient' | '' (unclassified: a malformed query fails everywhere, don't fail over)."""
+    e = (error or "").lower()
+    if any(m in e for m in ("payment required", "insufficient credit", "out of credits", "quota", "402", "429",
+                            "rate limit", "too many requests", "usage limit", "billing")):
+        return "quota"
+    if any(m in e for m in ("unauthorized", "forbidden", "401", "403", "invalid api key", "api key",
+                            "not set", "authentication")):
+        return "auth"
+    if any(m in e for m in _FAILOVER_MARKERS):
+        return "transient"
+    return ""
+
+
+def _search_fallback_names() -> list:
+    from tools.web_tools import _load_web_config
+    raw = _load_web_config().get("search_fallbacks") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(n).lower().strip() for n in raw if str(n).strip()] if isinstance(raw, (list, tuple)) else []
+
+
+def _fallback_search(provider_name: str, original_error: str, query: str, limit: int):
+    """Try ``web.search_fallbacks`` in order after *provider_name* failed. Returns the annotated success
+    response, or ``None`` (nothing configured / error not failover-class / nobody served)."""
+    names = [n for n in _search_fallback_names() if n != provider_name]
+    if not names or not _failover_class(original_error):
+        return None
+    from tools.web_tools import _provider_is_ready, _registered_web_provider
+    for name in names:
+        provider = _registered_web_provider(name)
+        if provider is None or not provider.supports_search() or not _provider_is_ready(provider):
+            continue
+        try:
+            resp = provider.search(query, limit)
+        except Exception as exc:  # noqa: BLE001 — next fallback
+            logger.info("search fallback '%s' raised: %s", name, str(exc)[:200])
+            continue
+        if resp.get("success"):
+            logger.warning(
+                "web_search backend '%s' failed (%s: %s); served by fallback '%s'",
+                provider_name, _failover_class(original_error), (original_error or "")[:120], name,
+            )
+            resp.setdefault("data", {}).update(
+                served_by=name, failed_over_from=provider_name,
+                backend_error=f"Backend '{provider_name}' failed ({(original_error or '')[:200]}); served by '{name}'.",
+            )
+            return resp
+        logger.info("search fallback '%s' failed: %s", name, str(resp.get("error", ""))[:200])
+    return None
