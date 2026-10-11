@@ -313,8 +313,13 @@ def _topic_compact_categories(skills_dir: Optional[Path]) -> frozenset:
         _cfg = load_config_readonly()
         _gw = (((_cfg.get("gateway") or {}).get("platforms") or {}).get("telegram") or {}).get("extra")
         _top = ((_cfg.get("platforms") or {}).get("telegram") or {}).get("extra")
-        merged = {**(_gw if isinstance(_gw, dict) else {}), **(_top if isinstance(_top, dict) else {})}
-        focus = topic_skill_focus(merged.get("group_topics"), get_session_env("HERMES_SESSION_CHAT_ID", ""), thread_id)
+        # A top-level ``telegram:`` section is the shape most user configs use.
+        _bare = (_cfg.get("telegram") or {}).get("extra")
+        merged = {}
+        for part in (_bare, _gw, _top):
+            if isinstance(part, dict):
+                merged.update(part)
+        focus =topic_skill_focus(merged.get("group_topics"), get_session_env("HERMES_SESSION_CHAT_ID", ""), thread_id)
         if focus is None:
             return frozenset()
         root = skills_dir if skills_dir is not None else (get_hermes_home() / "skills")

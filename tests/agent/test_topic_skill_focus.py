@@ -48,3 +48,22 @@ def test_focus_never_hides_a_skill_and_shrinks_the_block(monkeypatch, tmp_path):
     assert "Long deployer description text" in focused           # focus stays full
     assert "Long helper description text" in focused             # core stays full
     assert "Long coach description text" in full                 # control: full render has it
+
+
+@pytest.mark.parametrize("shape", ["bare", "platforms"])
+def test_topic_focus_read_from_every_telegram_config_shape(monkeypatch, tmp_path, shape):
+    """Regression: a top-level ``telegram:`` section (the common user shape) was ignored."""
+    import yaml
+    from agent.system_prompt import _topic_compact_categories
+    from gateway.session_context import clear_session_vars, set_session_vars
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    for cat in ("devops", "health", "meta"):
+        (tmp_path / "skills" / cat).mkdir(parents=True)
+    tg = {"extra": {"group_topics": TOPICS}}
+    cfg = {"telegram": tg} if shape == "bare" else {"platforms": {"telegram": tg}}
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(cfg))
+    tokens = set_session_vars(platform="telegram", chat_id="-1001", thread_id="7")
+    try:
+        assert _topic_compact_categories(tmp_path / "skills") == {"health"}
+    finally:
+        clear_session_vars(tokens)
