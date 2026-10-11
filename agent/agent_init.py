@@ -1256,6 +1256,22 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
     return kwargs
 
 
+def scope_filter_delivers(mem_config, skip_memory) -> bool:
+    """memory.scope_filter only takes effect when spine's prefetch can deliver the deferred entries.
+
+    Spine is the only provider that returns @when:-tagged MEMORY.md / USER.md entries, and it only
+    runs when it is the configured provider and memory is not skipped. Otherwise deferred entries
+    would be in no prompt at all, so every entry stays in the snapshot."""
+    cfg = mem_config or {}
+    if not bool(cfg.get("scope_filter", False)):
+        return False
+    active = (not skip_memory) and str(cfg.get("provider", "") or "").strip().lower() == "spine"
+    if not active:
+        logger.info("memory.scope_filter ignored: spine is not the active memory provider, "
+                    "keeping every entry in the prompt")
+    return active
+
+
 def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
     # Persistent memory (MEMORY.md + USER.md) — loaded from disk
     agent._memory_store = None
@@ -1297,7 +1313,7 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
                     # hotcore-retrieval-split phase 4: off unless explicitly
                     # enabled. When on, @when:-tagged entries leave the frozen
                     # system-prompt snapshot and arrive via spine prefetch().
-                    scope_filter=bool(mem_config.get("scope_filter", False)),
+                    scope_filter=scope_filter_delivers(mem_config, skip_memory),
                 )
                 agent._memory_store.load_from_disk()
         except Exception as _mem_exc:

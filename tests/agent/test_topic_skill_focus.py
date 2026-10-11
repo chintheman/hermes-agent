@@ -20,6 +20,8 @@ def test_focus_lookup_matches_chat_and_thread_only():
     assert topic_skill_focus(TOPICS, "-1001", "8") is None   # topic without skill_focus
     assert topic_skill_focus(TOPICS, "-100999", "7") is None  # other chat
     assert topic_skill_focus(TOPICS, "-1001", "") is None
+    assert topic_skill_focus(TOPICS, "", "7") is None         # no chat id: never a thread-id-only match
+    assert topic_skill_focus({"-1001": TOPICS[0]["topics"]}, "", "7") is None
     legacy = {"-1001": [{"thread_id": 7, "skill_focus": "health"}]}
     assert topic_skill_focus(legacy, "-1001", "7") == ("health",)
 

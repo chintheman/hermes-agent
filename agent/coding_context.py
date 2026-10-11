@@ -602,7 +602,7 @@ def topic_skill_focus(group_topics: Any, chat_id: str, thread_id: str) -> Option
     """``skill_focus`` of the Telegram forum topic matching (chat_id, thread_id), else None.
     Accepts the same two ``group_topics`` shapes the Telegram adapter does: a list of
     ``{"chat_id", "topics": [...]}`` entries, or a legacy ``{chat_id: [topic, ...]}`` dict."""
-    if not thread_id:
+    if not thread_id or not chat_id:
         return None
     if isinstance(group_topics, dict):
         entries = [{"chat_id": k, "topics": v} for k, v in group_topics.items()]
@@ -611,7 +611,7 @@ def topic_skill_focus(group_topics: Any, chat_id: str, thread_id: str) -> Option
     else:
         return None
     for entry in entries:
-        if chat_id and str(entry.get("chat_id", "")) != str(chat_id):
+        if str(entry.get("chat_id", "")) != str(chat_id):
             continue
         topics = entry.get("topics")
         for topic in (topics if isinstance(topics, list) else []):

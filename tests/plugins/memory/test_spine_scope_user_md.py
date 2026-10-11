@@ -41,3 +41,19 @@ def test_scope_filter_off_keeps_everything_in_both_snapshots(tmp_path, monkeypat
     s.load_from_disk()
     assert "squat 5x5" in s.format_for_system_prompt("user")
     assert "garmin cron" in s.format_for_system_prompt("memory")
+
+
+def test_scope_filter_needs_spine_active_or_tagged_entries_stay_in_prompt(tmp_path, monkeypatch):
+    """Invariant: entries are only deferred when something can deliver them back."""
+    from agent.agent_init import scope_filter_delivers
+
+    _setup(tmp_path, monkeypatch)
+    cfg = {"scope_filter": True, "provider": ""}
+    assert scope_filter_delivers({**cfg, "provider": "spine"}, skip_memory=False) is True
+    for mem_cfg, skip in ((cfg, False), ({**cfg, "provider": "honcho"}, False),
+                          ({**cfg, "provider": "spine"}, True)):
+        assert scope_filter_delivers(mem_cfg, skip) is False
+        s = MemoryStore(scope_filter=scope_filter_delivers(mem_cfg, skip))
+        s.load_from_disk()
+        assert "squat 5x5" in s.format_for_system_prompt("user")
+        assert "garmin cron" in s.format_for_system_prompt("memory")

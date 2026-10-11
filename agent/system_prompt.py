@@ -319,6 +319,9 @@ def _topic_compact_categories(skills_dir: Optional[Path]) -> frozenset:
             return frozenset()
         root = skills_dir if skills_dir is not None else (get_hermes_home() / "skills")
         present = [d.name for d in Path(root).iterdir() if d.is_dir() and not d.name.startswith(".")]
+        _missing = [c for c in focus if c not in present]
+        if _missing:
+            logger.info("skill_focus names categories not under %s: %s", root, ", ".join(_missing))
         return topic_compact_skill_categories(present, focus)
     except Exception:
         return frozenset()  # fail open: every category stays full
