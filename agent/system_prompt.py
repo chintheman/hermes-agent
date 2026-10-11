@@ -300,6 +300,30 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
 
 
 
+def _topic_compact_categories(skills_dir: Optional[Path]) -> frozenset:
+    """Categories a Telegram forum topic demotes to names-only via ``skill_focus`` (empty when the
+    session is not in such a topic). Read once at prompt build, so the prompt stays byte-stable."""
+    try:
+        from gateway.session_context import get_session_env
+        thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "")
+        if not thread_id or get_session_env("HERMES_SESSION_PLATFORM", "").lower() != "telegram":
+            return frozenset()
+        from agent.coding_context import topic_compact_skill_categories, topic_skill_focus
+        from hermes_cli.config import load_config_readonly
+        _cfg = load_config_readonly()
+        _gw = (((_cfg.get("gateway") or {}).get("platforms") or {}).get("telegram") or {}).get("extra")
+        _top = ((_cfg.get("platforms") or {}).get("telegram") or {}).get("extra")
+        merged = {**(_gw if isinstance(_gw, dict) else {}), **(_top if isinstance(_top, dict) else {})}
+        focus = topic_skill_focus(merged.get("group_topics"), get_session_env("HERMES_SESSION_CHAT_ID", ""), thread_id)
+        if focus is None:
+            return frozenset()
+        root = skills_dir if skills_dir is not None else (get_hermes_home() / "skills")
+        present = [d.name for d in Path(root).iterdir() if d.is_dir() and not d.name.startswith(".")]
+        return topic_compact_skill_categories(present, focus)
+    except Exception:
+        return frozenset()  # fail open: every category stays full
+
+
 def _skills_prompt(agent: Any) -> str:
     """Skills index (empty without skills tools).  Focus mode demotes non-coding
     categories to names-only — never hidden, every name stays visible."""
@@ -313,6 +337,7 @@ def _skills_prompt(agent: Any) -> str:
         _compact_cats = coding_compact_skill_categories(platform=agent.platform, cwd=resolve_context_cwd())
     except Exception:
         _compact_cats = frozenset()
+    _compact_cats = frozenset(_compact_cats) | _topic_compact_categories(_agent_skills_dir(agent))
     return _pb.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
                                          compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
 

@@ -592,3 +592,42 @@ def get_profile(name: str) -> ContextProfile:
     """Return a registered profile, falling back to ``general``."""
     return _PROFILES.get(name, GENERAL_PROFILE)
 # ---- END PLUGIN-COMPAT ----
+
+
+# Always-full skill categories for a topic that sets ``skill_focus`` (never demoted).
+TOPIC_CORE_SKILL_CATEGORIES = frozenset({"meta", "quality-assurance", "security", "experts"})
+
+
+def topic_skill_focus(group_topics: Any, chat_id: str, thread_id: str) -> Optional[tuple[str, ...]]:
+    """``skill_focus`` of the Telegram forum topic matching (chat_id, thread_id), else None.
+    Accepts the same two ``group_topics`` shapes the Telegram adapter does: a list of
+    ``{"chat_id", "topics": [...]}`` entries, or a legacy ``{chat_id: [topic, ...]}`` dict."""
+    if not thread_id:
+        return None
+    if isinstance(group_topics, dict):
+        entries = [{"chat_id": k, "topics": v} for k, v in group_topics.items()]
+    elif isinstance(group_topics, list):
+        entries = [e for e in group_topics if isinstance(e, dict)]
+    else:
+        return None
+    for entry in entries:
+        if chat_id and str(entry.get("chat_id", "")) != str(chat_id):
+            continue
+        topics = entry.get("topics")
+        for topic in (topics if isinstance(topics, list) else []):
+            if isinstance(topic, dict) and topic.get("thread_id") is not None and str(topic["thread_id"]) == str(thread_id):
+                focus = topic.get("skill_focus")
+                if isinstance(focus, str):
+                    focus = [focus]
+                if isinstance(focus, (list, tuple)):
+                    return tuple(str(c).strip() for c in focus if str(c).strip())
+                return None
+    return None
+
+
+def topic_compact_skill_categories(present: Any, focus: Optional[tuple[str, ...]]) -> frozenset[str]:
+    """Categories to demote for a focused topic: everything present minus ``focus`` minus the core
+    set. No ``focus`` (None) demotes nothing. Demotion is names-only, never hiding."""
+    if focus is None:
+        return frozenset()
+    return frozenset(present) - frozenset(focus) - TOPIC_CORE_SKILL_CATEGORIES
