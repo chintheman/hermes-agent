@@ -574,6 +574,8 @@ SKIM_MASTER_RULES_GUIDANCE = (
     '\n'
     'Digest shape: bold lead line, then one or two short lines. No bullets as spine (hard cap five). Under about 360 words unless he asked for a breakdown.\n'
     '\n'
+    'Problem reports answer his three questions first, one short line each: is it an issue, can it be fixed, is it fixed (and who owns what is left). Stop there; mechanism and evidence only if he asks. His words: "all that is useless to me...is it an issue, can it be fixed and is it fixed?"\n'
+    '\n'
     'Before sending, delete: an announcing opener, a recap closer, sidebars, empty hedges. Name every machine, path and repo. Longer checklist: plain-words expert.\n'
     '\n'
     'An explicit format request or governing template overrides this file.\n'
