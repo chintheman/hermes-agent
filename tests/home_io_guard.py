@@ -32,6 +32,16 @@ _normcase = os.path.normcase
 _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_PREFIXES)
 
 
+# PM answers "sealed payload, or a plain git checkout?" by probing ``<tree parent>/manifest.json``
+# (``pm.environments._payload_manifest``). A default install checks the repo out INSIDE the home
+# (the carve-out above), so that probe lands on the real home — and for a git checkout it finds no
+# file at all. Probing for a file that is not there is command lookup, not reading Hermes state;
+# without this carve-out every bootstrap-touching test fails on a default install.
+_PAYLOAD_PROBE_STRS = (
+    _normcase(os.fspath(Path(__file__).resolve().parent.parent.parent / "manifest.json")),
+)
+
+
 def _within(path: str, prefix: str) -> bool:
     """``Path(path).is_relative_to(prefix)`` for two normalized, case-folded absolute strings."""
     if path == prefix:
@@ -79,6 +89,10 @@ class HomeIOGuard:
             # link to compare inode identity); resolving it names whatever file that fd holds,
             # which is not I/O against the home.
             if metadata and (absolute == "/proc" or absolute.startswith("/proc" + os.sep)):
+                return
+            # The payload probe (see _PAYLOAD_PROBE_STRS): a lookup for a manifest beside the
+            # checkout, which on a default install sits inside the home.
+            if absolute in _PAYLOAD_PROBE_STRS:
                 return
             resolved = self._refuse_installed_app_change(value, absolute) if destructive else None
             roots = tuple(_normcase(os.fspath(r)) for r in self.roots())
