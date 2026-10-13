@@ -20,7 +20,7 @@ from plugins.web.firecrawl.provider import _is_tool_gateway_ready, check_firecra
 from tools.debug_helpers import DebugSession
 from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection, selection_exists
 from tools.url_safety import async_is_safe_url
-from tools.web_tools_rescue import _managed_search_fallback, _rescue_eligible, _rescue_search
+from tools.web_tools_rescue import _fallback_search, _managed_search_fallback, _rescue_eligible, _rescue_search
 from tools.web_tools_truncate import _effective_char_limit, _trim_results, _truncate_results, convert_base64_images_to_links
 from tools.web_tools_extract import (
     _extract_safe_urls, _merge_in_order, _no_provider_error, _resolve_extract_provider, _result_entry,
@@ -358,12 +358,18 @@ def _memoized_search(provider, query: str, limit: int) -> dict:
         fetch_limit = bucket_limit(limit)
         try:
             resp = provider.search(query, fetch_limit)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — candidate for failover / managed fallback / rescue
+            served = _fallback_search(provider.name, str(exc), query, fetch_limit)
+            if served is not None:
+                return served, True
             served = _served_after_failure(str(exc), fetch_limit)
             if served is None:
                 raise
             return served, True
         if not resp.get("success"):
+            served = _fallback_search(provider.name, str(resp.get("error", "")), query, fetch_limit)
+            if served is not None:
+                return served, True
             served = _served_after_failure(str(resp.get("error", "")), fetch_limit)
             if served is not None:
                 return served, True

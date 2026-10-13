@@ -3281,7 +3281,12 @@ class ContextCompressor(
         # "old results become 1-line summaries" rule: a summarized failure reads as success, so
         # the model re-issues the same call forever. Applies to every path that lands here, which
         # includes the pressure pass inside the protected tail.
-        if _looks_like_failure(content):
+        # A refused call is the exception: its summary records the denial verbatim ("BLOCKED, not
+        # run … the user did NOT consent"), so demoting it keeps the failure AND the do-not-retry
+        # instruction. The other two failure spares (the salvage placeholder, the lean-tail
+        # recovery stub) stay unconditional — neither carries the denial.
+        if _looks_like_failure(content) and _summarize_refused_tool_result(
+                tool_name, _json_dict(tool_args), content) is None:
             return False
         if protected_skills and tool_name == "skill_view":
             _skill = _json_dict(tool_args).get("name", "")
