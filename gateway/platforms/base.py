@@ -421,23 +421,35 @@ def _mine_requires_live_work() -> bool:
     return bool(value) if value is not None else True
 
 
-def _has_live_work_for_chat(platform: str, chat_id: Any, thread_id: Any = None) -> bool:
+def _key_matches_chat(key: str, platform: str, chat: str, thread: "str | None") -> bool:
+    """Whether session ``key`` belongs to ``platform``/``chat`` (and ``thread`` when given).
+    Boundary-checked substring match, not a ``split(":")``: chat ids can themselves contain ``:``
+    (Matrix ``!room:server``), and a split would never match them, dropping a true MINE."""
+    if f":{platform}:" not in key:
+        return False
+    seg, start = f":{chat}", 0
+    while (i := key.find(seg, start)) != -1:
+        start = i + 1
+        rest = key[i + len(seg):]
+        if rest and not rest.startswith(":"):
+            continue  # -100123 must not match -1001234
+        if thread is None or rest == f":{thread}" or rest.startswith(f":{thread}:"):
+            return True
+    return False
+
+
+def _has_live_work_for_chat(platform: str, chat_id: object, thread_id: object = None) -> bool:
     """Whether a live background process or async delegation belongs to this conversation.
     Session keys are ``<ns>:<platform>:<chat_type>:<chat_id>[:<thread_id>][:<user>]`` (see
-    ``gateway.session.build_session_key``), so match on the segments: same platform, the chat_id,
-    and (when the send is in a topic/thread) the thread_id right after it. Work in a different
-    topic of the same chat does NOT count. A send with no thread_id matches any topic in the chat
-    (the safe side: keeps MINE). Raises on lookup failure; the caller fails open."""
+    ``gateway.session.build_session_key``): same platform, the chat_id, and (when the send is in a
+    topic/thread) the thread_id right after it. Work in a different topic of the same chat does
+    NOT count. A send with no thread_id matches any topic in the chat (the safe side: keeps MINE).
+    Raises on lookup failure; the caller fails open."""
     from tools.async_delegation import live_session_keys as _deleg_keys
     from tools.process_registry import process_registry
     chat, thread = str(chat_id), (str(thread_id) if thread_id not in (None, "") else None)
-    for key in process_registry.live_session_keys() | _deleg_keys():
-        parts = key.split(":")
-        if platform not in parts[:4] or chat not in parts[3:]:
-            continue
-        if thread is None or thread in parts[parts.index(chat, 3) + 1:][:1]:
-            return True
-    return False
+    return any(_key_matches_chat(key, platform, chat, thread)
+               for key in process_registry.live_session_keys() | _deleg_keys())
 
 
 def _ownership_formatted_call(args: tuple, kwargs: dict, content_index: int,

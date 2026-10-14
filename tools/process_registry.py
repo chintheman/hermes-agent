@@ -2518,8 +2518,9 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
             and (max_active_age is None or (now - s.started_at) < max_active_age))
 
     def live_session_keys(self) -> set:
-        """Gateway session keys that own at least one still-running process."""
-        self._any_running(lambda s: False)  # refresh detached sessions first
+        """Gateway session keys that own at least one still-running process. Pure snapshot read
+        (no detached-session refresh, no PID probes): it runs on the send path, so it must not do
+        I/O. A stale detached entry only errs toward keeping a MINE line."""
         with self._lock:
             return {s.session_key for s in self._running.values() if not s.exited and s.session_key}
 

@@ -302,3 +302,40 @@ async def test_mine_in_code_fence_untouched(monkeypatch):
     _live(monkeypatch)
     text = "```\nMINE: example\n```\n\nYOURS: go"
     assert await _send(text) == text
+
+
+def test_base_module_imports_directly():
+    """Negative control for annotation-before-import bugs: importing gateway.platforms.base first
+    (not via gateway.run) must work, as a script or cron would."""
+    import subprocess
+    import sys
+    done = subprocess.run([sys.executable, "-c", "import gateway.platforms.base"],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+
+
+@pytest.mark.parametrize("key,chat,thread,expected", [
+    (_KEY, "-1004389869012", "33597", True),
+    (_KEY, "-1004389869012", None, True),            # no thread on the send: any topic counts
+    (_KEY, "-1004389869012", "3359", False),         # thread prefix is not a match
+    (_KEY, "-100438986901", "33597", False),         # chat prefix is not a match
+    (_OTHER_KEY, "-1004389869012", "33597", False),
+    ("agent:main:matrix:group:!abc:server.org:t1", "!abc:server.org", "t1", True),
+    ("agent:main:matrix:group:!abc:server.org:t1", "!abc:server.org", "t2", False),
+])
+def test_key_matching_boundaries(key, chat, thread, expected):
+    platform = key.split(":")[2]
+    assert gw_base._key_matches_chat(key, platform, chat, thread) is expected
+
+
+def test_registry_live_session_keys_is_a_pure_snapshot():
+    """The real registry method (not a stub) returns running keys and skips exited ones."""
+    from types import SimpleNamespace
+    from tools.process_registry import ProcessRegistry
+    reg = ProcessRegistry.__new__(ProcessRegistry)
+    import threading
+    reg._lock = threading.Lock()
+    reg._running = {"a": SimpleNamespace(exited=False, session_key=_KEY),
+                    "b": SimpleNamespace(exited=True, session_key=_OTHER_KEY),
+                    "c": SimpleNamespace(exited=False, session_key="")}
+    assert reg.live_session_keys() == {_KEY}
