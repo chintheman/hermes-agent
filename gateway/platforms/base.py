@@ -411,7 +411,37 @@ def _ownership_formatter_enabled() -> bool:
     return bool(value) if value is not None else True
 
 
-def _ownership_formatted_call(args: tuple, kwargs: dict, content_index: int) -> tuple:
+def _mine_requires_live_work() -> bool:
+    """``display.mine_requires_live_work`` from config.yaml (default True): drop the MINE line
+    from an outbound message when no background work is live for that conversation (the "MINE
+    only when something is running now" rule, enforced in code). Fail-open to default."""
+    value = _config_section("display").get("mine_requires_live_work", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value) if value is not None else True
+
+
+def _has_live_work_for_chat(platform: str, chat_id: Any, thread_id: Any = None) -> bool:
+    """Whether a live background process or async delegation belongs to this conversation.
+    Session keys are ``<ns>:<platform>:<chat_type>:<chat_id>[:<thread_id>][:<user>]`` (see
+    ``gateway.session.build_session_key``), so match on the segments: same platform, the chat_id,
+    and (when the send is in a topic/thread) the thread_id right after it. Work in a different
+    topic of the same chat does NOT count. A send with no thread_id matches any topic in the chat
+    (the safe side: keeps MINE). Raises on lookup failure; the caller fails open."""
+    from tools.async_delegation import live_session_keys as _deleg_keys
+    from tools.process_registry import process_registry
+    chat, thread = str(chat_id), (str(thread_id) if thread_id not in (None, "") else None)
+    for key in process_registry.live_session_keys() | _deleg_keys():
+        parts = key.split(":")
+        if platform not in parts[:4] or chat not in parts[3:]:
+            continue
+        if thread is None or thread in parts[parts.index(chat, 3) + 1:][:1]:
+            return True
+    return False
+
+
+def _ownership_formatted_call(args: tuple, kwargs: dict, content_index: int,
+                              platform: str = "", chat_index: int = 0) -> tuple:
     """``(args, kwargs)`` with the ``content`` argument (positional at ``content_index`` or by
     keyword) passed through ``format_ownership_block``. Positional/keyword-agnostic so it covers
     every adapter's ``send``/``edit_message`` override without caring which calling convention a
@@ -420,13 +450,30 @@ def _ownership_formatted_call(args: tuple, kwargs: dict, content_index: int) -> 
     try:
         if not _ownership_formatter_enabled():
             return args, kwargs
+
+        def _format(text: str) -> str:
+            keep_mine = True
+            try:
+                if _mine_requires_live_work() and "MINE" in text:
+                    chat_id = kwargs["chat_id"] if "chat_id" in kwargs else (
+                        args[chat_index] if len(args) > chat_index else None)
+                    meta = kwargs.get("metadata") if "metadata" in kwargs else (
+                        args[3] if content_index == 1 and len(args) > 3 else None)
+                    thread_id = meta.get("thread_id") if isinstance(meta, dict) else None
+                    if chat_id is not None:
+                        keep_mine = _has_live_work_for_chat(platform, chat_id, thread_id)
+            except Exception:
+                logger.warning("live-work gate failed; keeping MINE line", exc_info=True)
+                keep_mine = True
+            return format_ownership_block(text, keep_mine=keep_mine)
+
         if "content" in kwargs:
             if isinstance(kwargs["content"], str):
                 kwargs = dict(kwargs)
-                kwargs["content"] = format_ownership_block(kwargs["content"])
+                kwargs["content"] = _format(kwargs["content"])
             return args, kwargs
         if len(args) > content_index and isinstance(args[content_index], str):
-            formatted = format_ownership_block(args[content_index])
+            formatted = _format(args[content_index])
             args = args[:content_index] + (formatted,) + args[content_index + 1:]
         return args, kwargs
     except Exception:
@@ -2098,12 +2145,12 @@ class BasePlatformAdapter(ABC):
 
         @functools.wraps(orig_send)
         async def _send(*args, **kwargs):
-            args, kwargs = _ownership_formatted_call(args, kwargs, content_index=1)
+            args, kwargs = _ownership_formatted_call(args, kwargs, 1, self.platform.value)
             return await orig_send(*args, **kwargs)
 
         @functools.wraps(orig_edit)
         async def _edit_message(*args, **kwargs):
-            args, kwargs = _ownership_formatted_call(args, kwargs, content_index=2)
+            args, kwargs = _ownership_formatted_call(args, kwargs, 2, self.platform.value)
             return await orig_edit(*args, **kwargs)
 
         self.send, self.edit_message = _send, _edit_message
@@ -2117,7 +2164,8 @@ class BasePlatformAdapter(ABC):
         if orig_send_for_platform is not None:
             @functools.wraps(orig_send_for_platform)
             async def _send_for_platform(*args, **kwargs):
-                args, kwargs = _ownership_formatted_call(args, kwargs, content_index=2)
+                logical = str(getattr(args[0], "value", args[0])) if args else self.platform.value
+                args, kwargs = _ownership_formatted_call(args, kwargs, 2, logical, chat_index=1)
                 return await orig_send_for_platform(*args, **kwargs)
             self.send_for_platform = _send_for_platform
 

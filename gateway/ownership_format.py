@@ -137,21 +137,23 @@ def _is_empty_value(value: str, empty_values: list) -> bool:
     return any(v == str(ev).strip().lower().rstrip(".") for ev in empty_values)
 
 
-def format_ownership_block(text: str, spec: Optional[Dict[str, Any]] = None) -> str:
+def format_ownership_block(text: str, spec: Optional[Dict[str, Any]] = None,
+                           keep_mine: bool = True) -> str:
     """Collapse every labelled MINE/YOURS line in ``text`` into ONE block at the end, per
-    ``spec`` (loaded from the shared spec file when omitted). Never raises: any internal error
-    returns ``text`` unchanged, logged.
+    ``spec`` (loaded from the shared spec file when omitted). ``keep_mine=False`` also drops the
+    MINE lines (nothing is running, so there is nothing to own). Never raises: any internal
+    error returns ``text`` unchanged, logged.
     """
     if not text or not isinstance(text, str):
         return text
     try:
-        return _format(text, spec or _load_spec())
+        return _format(text, spec or _load_spec(), keep_mine)
     except Exception:
         logger.error("ownership formatter failed; sending original text unchanged", exc_info=True)
         return text
 
 
-def _format(text: str, spec: Dict[str, Any]) -> str:
+def _format(text: str, spec: Dict[str, Any], keep_mine: bool = True) -> str:
     labels: Dict[str, str] = spec.get("labels") or _DEFAULT_SPEC["labels"]
     pattern = spec.get("label_pattern") or _DEFAULT_SPEC["label_pattern"]
     empty_values = spec.get("empty_values") or _DEFAULT_SPEC["empty_values"]
@@ -204,7 +206,7 @@ def _format(text: str, spec: Dict[str, Any]) -> str:
             merged.append(v.strip())
         return "; ".join(merged)
 
-    mine_merged = _merge(mine_values) if mine_values else ""
+    mine_merged = _merge(mine_values) if mine_values and keep_mine else ""
     yours_merged = _merge(yours_values) if yours_values else ""
 
     drop_empty = bool((spec.get("rules") or {}).get("drop_empty_labels", True))

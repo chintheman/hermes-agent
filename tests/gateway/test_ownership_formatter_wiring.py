@@ -11,7 +11,17 @@ import inspect
 import pytest
 
 from gateway.config import Platform, PlatformConfig
+import gateway.platforms.base as gw_base
 from gateway.platforms.base import BasePlatformAdapter, SendResult
+
+_REAL_LIVE_WORK_CHECK = gw_base._has_live_work_for_chat
+
+
+@pytest.fixture(autouse=True)
+def _assume_live_work(monkeypatch):
+    """The collapse tests exercise the formatter, not the live-work gate: treat work as live
+    unless a test installs the real check via ``_live``."""
+    monkeypatch.setattr(gw_base, "_has_live_work_for_chat", lambda *a, **k: True)
 
 
 class _RecordingAdapter(BasePlatformAdapter):
@@ -222,3 +232,73 @@ async def test_disabled_flag_check_failure_never_blocks_a_send(monkeypatch):
     result = await adapter.send("123", raw)
     assert result.success is True
     assert adapter.sent_content == [raw]
+
+
+# --- display.mine_requires_live_work: drop MINE when nothing is live for this conversation ---
+
+_KEY = "agent:main:telegram:group:-1004389869012:33597"
+_OTHER_KEY = "agent:main:telegram:group:-1004389869012:11111"
+_TEXT = "Body.\n\nMINE: the memory trim. Starting now.\nYOURS: approve"
+
+
+def _live(monkeypatch, proc_keys=(), deleg_keys=()):
+    from tools import async_delegation
+    from tools.process_registry import process_registry
+    monkeypatch.setattr(gw_base, "_has_live_work_for_chat", _REAL_LIVE_WORK_CHECK)
+    monkeypatch.setattr(process_registry, "live_session_keys", lambda: set(proc_keys))
+    monkeypatch.setattr(async_delegation, "live_session_keys", lambda: set(deleg_keys))
+
+
+async def _send(text=_TEXT, thread="33597"):
+    adapter = _RecordingAdapter()
+    await adapter.send("-1004389869012", text, metadata={"thread_id": thread})
+    return adapter.sent_content[0]
+
+
+@pytest.mark.asyncio
+async def test_stale_mine_dropped_when_no_live_work(monkeypatch):
+    _live(monkeypatch)
+    assert await _send() == "Body.\n\nYOURS: approve"
+
+
+@pytest.mark.asyncio
+async def test_mine_kept_with_running_process_in_same_topic(monkeypatch):
+    _live(monkeypatch, proc_keys=[_KEY])
+    assert await _send() == "Body.\n\nMINE: the memory trim. Starting now.\nYOURS: approve"
+
+
+@pytest.mark.asyncio
+async def test_mine_kept_with_live_delegation_in_same_topic(monkeypatch):
+    _live(monkeypatch, deleg_keys=[_KEY])
+    assert "MINE:" in await _send()
+
+
+@pytest.mark.asyncio
+async def test_mine_dropped_when_work_is_in_a_different_topic(monkeypatch):
+    _live(monkeypatch, proc_keys=[_OTHER_KEY])
+    assert await _send() == "Body.\n\nYOURS: approve"
+
+
+@pytest.mark.asyncio
+async def test_gate_exception_keeps_text(monkeypatch):
+    from tools.process_registry import process_registry
+    monkeypatch.setattr(gw_base, "_has_live_work_for_chat", _REAL_LIVE_WORK_CHECK)
+
+    def boom():
+        raise RuntimeError("registry down")
+    monkeypatch.setattr(process_registry, "live_session_keys", boom)
+    assert "MINE:" in await _send()
+
+
+@pytest.mark.asyncio
+async def test_flag_false_disables_gate(tmp_path, monkeypatch):
+    _live(monkeypatch)
+    _write_config(tmp_path, monkeypatch, "display:\n  mine_requires_live_work: false\n")
+    assert "MINE:" in await _send()
+
+
+@pytest.mark.asyncio
+async def test_mine_in_code_fence_untouched(monkeypatch):
+    _live(monkeypatch)
+    text = "```\nMINE: example\n```\n\nYOURS: go"
+    assert await _send(text) == text

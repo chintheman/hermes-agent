@@ -696,6 +696,13 @@ def has_live_for_session(session_key: str = "", origin_ui_session_id: str = "", 
     return bool(_session_records(_LIVE_STATES, session_key, origin_ui_session_id, parent_session_id))
 
 
+def live_session_keys() -> set:
+    """Gateway session keys that still own a live (running/stalling/finalizing) delegation."""
+    with _records_lock:
+        return {str(r.get("session_key") or "") for r in _records.values()
+                if r.get("status") in _LIVE_STATES} - {""}
+
+
 def _new_delegation_id() -> str:
     return f"deleg_{uuid.uuid4().hex[:8]}"
 

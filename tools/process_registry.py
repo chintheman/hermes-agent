@@ -2517,6 +2517,12 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin):
             lambda s: s.session_key == session_key
             and (max_active_age is None or (now - s.started_at) < max_active_age))
 
+    def live_session_keys(self) -> set:
+        """Gateway session keys that own at least one still-running process."""
+        self._any_running(lambda s: False)  # refresh detached sessions first
+        with self._lock:
+            return {s.session_key for s in self._running.values() if not s.exited and s.session_key}
+
     def has_any_active(self) -> bool:
         """Whether ANY background process is running — scale-to-zero must not
         suspend a gateway with live background work or the process is lost."""
