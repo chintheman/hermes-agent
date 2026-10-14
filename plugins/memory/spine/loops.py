@@ -39,7 +39,13 @@ from .index import MemoryIndex, _cosine_similarity, _deserialize_vector
 # pair every raise with a real prune. The durable fix is the tracked
 # hotcore-retrieval-split (stop injecting situational corrections every call,
 # retrieve them instead).
-HOTCORE_BUDGET_BYTES = 30000
+#
+# 2026-10-14: raised 30,000 -> 36,000 (Chin's explicit call, made when the file sat at 35,436).
+# Paired with a real prune of 5,284 bytes, not a bare raise: 38 block rewrites (-3,168), one
+# detector-driven reword (-54) and 14 retired auto-promoted observations (-2,011), leaving
+# 33,425 at the moment of the raise. Measured near-duplicate headroom is now ~313 bytes, so the
+# next crossing has no cheap remedy left - the retrieval split is the only durable answer.
+HOTCORE_BUDGET_BYTES = 36000
 
 logger = logging.getLogger(__name__)
 
