@@ -302,6 +302,9 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     (fake_hermes_home / "memories").mkdir()
     (fake_hermes_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_hermes_home))
+    # A live checkout carries a gitignored install-stamp.json whose runtimeDir names the REAL
+    # PM store (<home>/installs/<hash>); without this, PM facts reads from tests hit the real home.
+    monkeypatch.setenv("HERMES_RUNTIME_DIR", str(fake_hermes_home / "tools"))
     # A test that pins the process home (hermes_constants.pin_process_hermes_home) must not
     # leak that module-global into the next test's routed-profile decisions.
     try:
