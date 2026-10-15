@@ -1029,7 +1029,16 @@ class SessionDB(
                     self._raise_if_db_replaced()
                     if self._conn is None:  # close() raced this writer
                         self._reopen_after_close_locked(context="write")
-                    self._conn.execute("BEGIN IMMEDIATE")
+                    # Writer connections carry a 1s busy_timeout; sqlite's busy handler sleeps in coarse steps on
+                    # some platforms (macOS: ~4s for 1s), so a sub-second patience budget must not use it.
+                    # The jittered loop below owns the wait.
+                    if patience_s < 1.0:
+                        self._conn.execute("PRAGMA busy_timeout=0")
+                    try:
+                        self._conn.execute("BEGIN IMMEDIATE")
+                    finally:
+                        if patience_s < 1.0:
+                            self._conn.execute("PRAGMA busy_timeout=1000")
                     try:
                         fn_started = True
                         result = fn(self._conn)
