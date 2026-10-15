@@ -1032,13 +1032,16 @@ class SessionDB(
                     # Writer connections carry a 1s busy_timeout; sqlite's busy handler sleeps in coarse steps on
                     # some platforms (macOS: ~4s for 1s), so a sub-second patience budget must not use it.
                     # The jittered loop below owns the wait.
+                    previous_ms = None
                     if patience_s < 1.0:
+                        previous_ms = self._conn.execute("PRAGMA busy_timeout").fetchone()[0]
                         self._conn.execute("PRAGMA busy_timeout=0")
                     try:
                         self._conn.execute("BEGIN IMMEDIATE")
                     finally:
-                        if patience_s < 1.0:
-                            self._conn.execute("PRAGMA busy_timeout=1000")
+                        if previous_ms is not None:
+                            with suppress(sqlite3.Error):  # never mask the lock error the retry loop acts on
+                                self._conn.execute(f"PRAGMA busy_timeout={int(previous_ms)}")
                     try:
                         fn_started = True
                         result = fn(self._conn)
