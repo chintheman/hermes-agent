@@ -930,9 +930,14 @@ class PluginContext:
                 logger.warning("Plugin '%s' locale file %s skipped: %s", self.manifest.name, file, exc)
         return handles
 
-    def register_hook(self, hook_name: str, callback: Callable) -> PluginRegistration:
-        """Register a lifecycle hook callback (unknown names warn but are still stored)."""
-        return self._track_callback("hook", hook_name, callback, self._manager._hooks, VALID_HOOKS)
+    def register_hook(self, hook_name: str, callback: Callable, *, first: bool = False) -> PluginRegistration:
+        """Register a lifecycle hook callback (unknown names warn but are still stored).
+
+        ``first=True`` puts the callback ahead of every callback registered so far, whatever the plugin load
+        order. For first-string-wins hooks (``transform_llm_output``) it is how a plugin that must win
+        deterministically gets consulted before plugins that rewrite text. Later ``first`` registrations
+        precede earlier ones."""
+        return self._track_callback("hook", hook_name, callback, self._manager._hooks, VALID_HOOKS, first=first)
 
     def register_middleware(self, kind: str, callback: Callable) -> PluginRegistration:
         """Register behavior-changing middleware (request kinds rewrite the payload, execution kinds
@@ -943,13 +948,18 @@ class PluginContext:
 
     def _track_callback(
         self, kind: str, key: str, callback: Callable, mapping: dict[str, list[Callable]],
-        valid: set[str],
+        valid: set[str], *, first: bool = False,
     ) -> PluginRegistration:
-        """Append ``callback`` under ``key`` (warning on unknown ``key``) and lease its removal."""
+        """Append ``callback`` under ``key`` (``first``: put it at the front) and lease its removal;
+        warns on unknown ``key``."""
         if key not in valid:
             logger.warning("Plugin '%s' registered unknown %s '%s' (valid: %s)", self.manifest.name, kind,
                            key, ", ".join(sorted(valid)))
-        mapping.setdefault(key, []).append(callback)
+        callbacks = mapping.setdefault(key, [])
+        if first:
+            callbacks.insert(0, callback)
+        else:
+            callbacks.append(callback)
         handle = self._track(kind, key, lambda: self._manager._remove_callback(mapping, key, callback))
         logger.debug("Plugin %s registered %s: %s", self.manifest.name, kind, key)
         return handle

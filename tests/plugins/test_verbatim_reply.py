@@ -45,6 +45,11 @@ def vr(tmp_path, monkeypatch):
     return mod
 
 
+def _llm(vr, **kw):
+    """The two registered callbacks in call order, first string wins (what the hook loop does)."""
+    return vr._on_transform_llm_output_first(**kw) or vr._on_transform_llm_output(**kw)
+
+
 def stage(vr, vid, text):
     p = vr.verbatim_dir() / (vid + ".md")
     p.write_text(text)
@@ -143,7 +148,7 @@ class TestToolResult:
 
 class TestLlmOutput:
     def out(self, vr, text="model words", platform="telegram", session="s1", turn="t1"):
-        return vr._on_transform_llm_output(response_text=text, session_id=session, model="m", platform=platform, turn_id=turn)
+        return _llm(vr, response_text=text, session_id=session, model="m", platform=platform, turn_id=turn)
 
     def test_scripted_text_replaces_the_model_text_joined_by_a_blank_line(self, vr, caplog):
         vr._PENDING[("s1", "t1")] = {"ts": time.time(), "ids": [ID1, ID2], "texts": ["one", "two"]}
@@ -358,8 +363,9 @@ class FakeCtx:
     def __init__(self):
         self.hooks = {}
 
-    def register_hook(self, name, cb):
-        self.hooks.setdefault(name, []).append(cb)
+    def register_hook(self, name, cb, first=False):
+        lst = self.hooks.setdefault(name, [])
+        lst.insert(0, cb) if first else lst.append(cb)
 
 
 def _wire(vr, monkeypatch):
@@ -449,7 +455,7 @@ class TestReviewFixes:
         return vr._on_transform_tool_result(tool_name=name, args={}, result=result, session_id=session, turn_id=turn)
 
     def out(self, vr, text="model words", platform="telegram", session="s1", turn="t1"):
-        return vr._on_transform_llm_output(response_text=text, session_id=session, model="m", platform=platform, turn_id=turn)
+        return _llm(vr, response_text=text, session_id=session, model="m", platform=platform, turn_id=turn)
 
     # 1. dedupe by text
     def test_same_text_under_two_ids_is_sent_once(self, vr):
@@ -668,3 +674,110 @@ def test_real_coach_staging_round_trips_through_the_plugin(vr, tmp_path, monkeyp
     # the marker form: first and last lines carry the same id
     ids = vr.find_ids(cv.wrap_text("x y"))
     assert len(ids) == 1
+
+
+# ---------------------------------------------------------------------------
+# Round 4: the scripted text wins whatever the load order
+# ---------------------------------------------------------------------------
+
+def _manager_with(vr, tmp_path, monkeypatch, rivals_before, rivals_after):
+    """A real PluginManager whose transform_llm_output callbacks were registered in the given order."""
+    from hermes_cli.plugins import PluginContext, PluginManager
+    from hermes_cli.plugins_manifest import PluginManifest
+
+    mgr = PluginManager()
+
+    def ctx(name):
+        return PluginContext(PluginManifest(name=name, source="user"), mgr)
+
+    for name, fn in rivals_before:
+        ctx(name).register_hook("transform_llm_output", fn)
+    vr.register(ctx("verbatim-reply"))
+    for name, fn in rivals_after:
+        ctx(name).register_hook("transform_llm_output", fn)
+    return mgr
+
+
+def rewrite(**kw):
+    return "REWRITTEN BY RIVAL: " + kw["response_text"]
+
+
+def footer(**kw):
+    return kw["response_text"] + "\n(footer)"
+
+
+@pytest.mark.parametrize("where", ["before", "after", "both"])
+def test_scripted_text_beats_rewriting_plugins_in_any_load_order(vr, tmp_path, monkeypatch, where):
+    rivals = [("plain-words-rewrite", rewrite), ("output-shape-guard", rewrite), ("groq-meter", footer)]
+    before = rivals if where in ("before", "both") else []
+    after = rivals if where in ("after", "both") else []
+    mgr = _manager_with(vr, tmp_path, monkeypatch, before, after)
+    vr._PENDING[("s1", "t1")] = {"ts": time.time(), "ids": [ID1], "texts": ["SCRIPTED CARD"]}
+    results = mgr.invoke_hook("transform_llm_output", response_text="model words", session_id="s1",
+                              model="m", platform="telegram", turn_id="t1")
+    assert next(r for r in results if isinstance(r, str)) == "SCRIPTED CARD"
+
+
+def test_negative_control_without_first_a_rival_loaded_earlier_wins(vr, tmp_path, monkeypatch):
+    """Shows the problem is real: registered in plain order after a rival, the scripted text loses."""
+    from hermes_cli.plugins import PluginContext, PluginManager
+    from hermes_cli.plugins_manifest import PluginManifest
+
+    mgr = PluginManager()
+    PluginContext(PluginManifest(name="plain-words-rewrite", source="user"), mgr).register_hook(
+        "transform_llm_output", rewrite)
+    PluginContext(PluginManifest(name="verbatim-reply", source="user"), mgr).register_hook(
+        "transform_llm_output", vr._on_transform_llm_output_first)       # no first=True
+    vr._PENDING[("s1", "t1")] = {"ts": time.time(), "ids": [ID1], "texts": ["SCRIPTED CARD"]}
+    results = mgr.invoke_hook("transform_llm_output", response_text="model words", session_id="s1",
+                              model="m", platform="telegram", turn_id="t1")
+    assert next(r for r in results if isinstance(r, str)).startswith("REWRITTEN BY RIVAL")
+
+
+def test_without_scripted_text_the_rival_still_wins(vr, tmp_path, monkeypatch):
+    mgr = _manager_with(vr, tmp_path, monkeypatch, [("plain-words-rewrite", rewrite)], [])
+    results = mgr.invoke_hook("transform_llm_output", response_text="model words", session_id="s1",
+                              model="m", platform="telegram", turn_id="t1")
+    assert next(r for r in results if isinstance(r, str)) == "REWRITTEN BY RIVAL: model words"
+
+
+def test_markers_are_stripped_even_when_a_rival_would_win(vr, tmp_path, monkeypatch):
+    mgr = _manager_with(vr, tmp_path, monkeypatch, [("plain-words-rewrite", rewrite)], [("groq-meter", footer)])
+    text = f"hello [verbatim {ID1}]"
+    results = mgr.invoke_hook("transform_llm_output", response_text=text, session_id="s1",
+                              model="m", platform="cli", turn_id="t1")
+    winner = next(r for r in results if isinstance(r, str))
+    assert "[verbatim" not in winner and winner == "hello"
+
+
+def test_a_second_scripted_turn_is_also_delivered_and_the_first_is_not_replayed(vr, tmp_path, monkeypatch):
+    mgr = _manager_with(vr, tmp_path, monkeypatch, [("plain-words-rewrite", rewrite)], [])
+    call = lambda turn: next((r for r in mgr.invoke_hook(
+        "transform_llm_output", response_text="x", session_id="s1", model="m", platform="cli", turn_id=turn)
+        if isinstance(r, str)), None)
+    vr._PENDING[("s1", "t1")] = {"ts": time.time(), "ids": [ID1], "texts": ["ONE"]}
+    assert call("t1") == "ONE"
+    assert call("t1").startswith("REWRITTEN")
+    vr._PENDING[("s1", "t2")] = {"ts": time.time(), "ids": [ID2], "texts": ["TWO"]}
+    assert call("t2") == "TWO"
+
+
+def test_first_registration_is_unloaded_cleanly(vr, tmp_path, monkeypatch):
+    mgr = _manager_with(vr, tmp_path, monkeypatch, [("plain-words-rewrite", rewrite)], [])
+    cbs = mgr._hooks["transform_llm_output"]
+    assert cbs[0] == vr._on_transform_llm_output_first
+    assert cbs.index(vr._on_transform_llm_output) > 0
+
+
+def test_register_falls_back_when_the_host_has_no_first_argument(vr):
+    class OldCtx:
+        def __init__(self):
+            self.calls = []
+
+        def register_hook(self, name, cb):
+            self.calls.append((name, cb))
+
+    ctx = OldCtx()
+    vr.register(ctx)
+    names = [n for n, _ in ctx.calls]
+    assert names.count("transform_llm_output") == 2

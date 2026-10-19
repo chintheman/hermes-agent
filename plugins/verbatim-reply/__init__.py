@@ -13,7 +13,8 @@ How it fits together (hook contracts are in hermes_cli/plugins.py VALID_HOOKS):
   read_file, session_search or web tools may echo an OLD id and are ignored), reads the staged text and keeps
   it, keyed by (session_id, turn_id). It never changes the result. An id is delivered at most once, and a text
   already held for the turn is not added twice.
-* transform_llm_output: if the turn has staged texts, the model's final text is replaced by them, joined by a
+* transform_llm_output: registered FIRST (register_hook(first=True)) so a scripted message wins over any other
+  plugin that rewrites replies, whatever the load order. If the turn has staged texts, the model's final text is replaced by them, joined by a
   blank line. The entry is looked up by (session_id, turn_id), then by turn_id alone when exactly one entry has
   it (context compression can change session_id mid-turn). Otherwise, on Telegram only, em and en dashes are
   scrubbed. `[verbatim <id>]` marker lines are stripped from every final text.
@@ -265,10 +266,14 @@ def _take_entry(session_id: str, turn_id: str) -> Optional[dict]:
     return None
 
 
-def _on_transform_llm_output(
+def _on_transform_llm_output_first(
     response_text: str = "", session_id: str = "", model: str = "", platform: str = "",
     turn_id: str = "", **_: Any,
 ) -> Optional[str]:
+    """Registered FIRST (see register), so it is consulted before every rewriting plugin whatever the load order:
+    transform_llm_output is first-string-wins, and a scripted message must never lose to another plugin's
+    rewrite (or be rewritten by it). Returns a string only for staged text, or for a model text that carries
+    `[verbatim <id>]` markers (stripped; this pre-empts later plugins for that rare reply)."""
     try:
         entry = _take_entry(session_id, turn_id)
         if entry and entry["texts"]:
@@ -276,6 +281,21 @@ def _on_transform_llm_output(
             with _LOCK:
                 _remember_delivered(entry["ids"], time.time())
             return strip_markers("\n\n".join(entry["texts"])) or None
+        if isinstance(response_text, str) and response_text:
+            stripped = strip_markers(response_text)
+            if stripped != response_text and stripped.strip():
+                # this reply is ours now (later plugins are skipped), so it gets the same Telegram scrub
+                return scrub_dashes(stripped) if (platform or "").lower() == "telegram" else stripped
+    except Exception as exc:
+        logger.debug("verbatim-reply transform_llm_output failed (non-fatal): %s", exc)
+    return None
+
+
+def _on_transform_llm_output(
+    response_text: str = "", platform: str = "", **_: Any,
+) -> Optional[str]:
+    """Registered in normal order: the Telegram dash scrub, which yields to any plugin that rewrites the text."""
+    try:
         if not isinstance(response_text, str) or not response_text:
             return None
         fixed = strip_markers(response_text)
@@ -284,7 +304,7 @@ def _on_transform_llm_output(
         if fixed != response_text and fixed.strip():
             return fixed
     except Exception as exc:
-        logger.debug("verbatim-reply transform_llm_output failed (non-fatal): %s", exc)
+        logger.debug("verbatim-reply dash scrub failed (non-fatal): %s", exc)
     return None
 
 
@@ -507,6 +527,11 @@ def _on_pre_tool_call(
 
 def register(ctx) -> None:
     ctx.register_hook("transform_tool_result", _on_transform_tool_result)
+    try:
+        ctx.register_hook("transform_llm_output", _on_transform_llm_output_first, first=True)
+    except TypeError:   # a host without register_hook(first=): the scripted text may then lose to a rewriting plugin
+        logger.warning("verbatim-reply: this host cannot register a hook first; scripted text may be pre-empted")
+        ctx.register_hook("transform_llm_output", _on_transform_llm_output_first)
     ctx.register_hook("transform_llm_output", _on_transform_llm_output)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
