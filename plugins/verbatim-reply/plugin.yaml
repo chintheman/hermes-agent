@@ -1,0 +1,9 @@
+name: verbatim-reply
+version: "0.1.0"
+description: "Enforce scripted replies in code. A coach script stages the exact message Chin must receive and prints its verbatim_id; this plugin collects those ids from tool results and sends the staged text instead of the model's own wording. It also blocks add-note text that is not Chin's own words, locks the coach skills against edits, and scrubs em and en dashes from Telegram replies."
+author: "0xsteamboat"
+hooks:
+  - transform_tool_result
+  - transform_llm_output
+  - pre_llm_call
+  - pre_tool_call
