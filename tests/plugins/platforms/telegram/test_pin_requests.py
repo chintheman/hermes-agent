@@ -73,6 +73,47 @@ def test_match_must_be_at_the_start_of_the_message():
     assert pr.take_pin_for_send(CHAT, THREAD, "  **Morning brief** Mon", now=NOW)["key"] == "op-brief"
 
 
+def test_match_may_follow_a_short_preamble_within_the_first_three_lines():
+    write_requests(req(key="op-workout", match="Mon 19 Oct C Full-Body"))
+    card = "Here is your workout:\n\n**Mon 19 Oct** C Full-Body Burn\nWarm-up"
+    assert pr.take_pin_for_send(CHAT, THREAD, card, now=NOW)["key"] == "op-workout"
+
+
+def test_match_on_the_third_non_empty_line_passes_and_on_the_fifth_fails():
+    write_requests(req(key="op-workout", match="Workout A"))
+    third = "Sure.\n\nGot it.\n\n**Workout A** Push\nrest"
+    assert pr.take_pin_for_send(CHAT, THREAD, third, now=NOW) is not None
+    write_requests(req(key="op-workout", match="Workout A"))
+    fifth = "one\ntwo\nthree\nfour\nWorkout A Push"
+    assert pr.take_pin_for_send(CHAT, THREAD, fifth, now=NOW) is None
+    assert len(pending_lines()) == 1
+
+
+def test_requeue_keeps_the_original_expiry_and_text():
+    r = req(expires=12)
+    pr.requeue_request(r)
+    assert pending_lines() == [r]
+
+
+def test_corrupt_ledger_still_drops_expired_pin_next_and_keeps_unpin_ops(paths):
+    pr.ledger_path().write_text("{oops")
+    write_requests(req(key="old", expires=-5), req(key="fresh", expires=30),
+                   {"op": "unpin", "key": "op-workout", "requested_at": iso(1)})
+    assert pr.collect_due_unpins(now=NOW) == []
+    assert [(r["op"], r["key"]) for r in pending_lines()] == [("pin_next", "fresh"), ("unpin", "op-workout")]
+
+
+def test_corrupt_ledger_is_logged_once_per_process(paths, caplog):
+    pr.ledger_path().write_text("{oops")
+    pr._corrupt_logged = False
+    import logging
+    with caplog.at_level(logging.ERROR):
+        for _ in range(3):
+            with pytest.raises(pr.LedgerCorrupt):
+                pr.ledger_load()
+    assert len([r for r in caplog.records if "corrupt" in r.getMessage()]) == 1
+
+
 def test_unpin_request_also_deletes_earlier_pending_pin_next_for_same_key():
     write_requests(req(key="op-workout", match="Workout A"), req(key="op-brief"),
                    {"op": "unpin", "key": "op-workout", "requested_at": iso(1)},

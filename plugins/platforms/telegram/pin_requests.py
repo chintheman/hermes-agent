@@ -35,11 +35,17 @@ _MARKUP_CHARS = re.compile(r"[*_`~]")
 _TAGS = re.compile(r"<[^>]+>")
 
 
+_corrupt_logged = False   # the corrupt-ledger error is logged once per process, not once per call
+
+
 class LedgerCorrupt(Exception):
     """pins.json exists but is not a JSON object. Never overwritten; a .bak copy is kept."""
 
 
 def _data_dir() -> Path:
+    # The gateway and every script that writes requests MUST share the same HERMES_HOME (the gateway's launchd
+    # plist sets /Users/0xsteamboat/.hermes; scripts default to ~/.hermes). A mismatch means requests are
+    # written to a file the gateway never reads.
     home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     return Path(home) / "data"
 
@@ -128,6 +134,13 @@ def _locked_rewrite(fn):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def requeue_request(req: dict) -> None:
+    """Put a consumed pin_next request back unchanged (same text, same original expiry) after the pin did not
+    happen. It can only match a later send to the same chat and thread with the same start, and it still
+    expires on schedule."""
+    append_request(req)
+
+
 # --- ledger (single writer: the gateway; atomic replace)
 
 def ledger_load() -> dict:
@@ -154,7 +167,10 @@ def ledger_load() -> dict:
             bak.write_text(raw)
     except OSError:
         pass
-    logger.error("pin ledger %s is corrupt; refusing to overwrite it (copy kept at %s)", path, bak)
+    global _corrupt_logged
+    if not _corrupt_logged:
+        _corrupt_logged = True
+        logger.error("pin ledger %s is corrupt; refusing to overwrite it (copy kept at %s)", path, bak)
     raise LedgerCorrupt("pin ledger %s is corrupt" % path)
 
 
@@ -188,6 +204,8 @@ def take_pin_for_send(chat_id: str, thread_id: Optional[str], content: str,
     (chat_id, thread_id). Expired requests are dropped on the way. None when nothing matches."""
     now = _now(now)
     norm = normalize(content)
+    # the match may open the message or any of its first 3 non-empty lines (a short model preamble)
+    heads = [norm] + [n for n in (normalize(l) for l in (content or "").splitlines()) if n][:3]
 
     def fn(items):
         keep, found = [], None
@@ -197,7 +215,7 @@ def take_pin_for_send(chat_id: str, thread_id: Optional[str], content: str,
             if (found is None and r.get("op") == "pin_next"
                     and str(r.get("chat_id")) == str(chat_id)
                     and thread_id is not None and str(r.get("thread_id")) == str(thread_id)
-                    and normalize(r.get("match", "")) and norm.startswith(normalize(r["match"]))):
+                    and normalize(r.get("match", "")) and any(h.startswith(normalize(r["match"])) for h in heads)):
                 found = r
                 continue
             keep.append(r)
@@ -217,6 +235,9 @@ def collect_due_unpins(now: Optional[datetime] = None) -> list[dict]:
     try:
         ledger_load()
     except LedgerCorrupt:
+        def drop_expired(items):
+            return [r for r in items if not (r.get("op") == "pin_next" and _expired(r, now))], None
+        _locked_rewrite(drop_expired)
         return []
 
     def fn(items):

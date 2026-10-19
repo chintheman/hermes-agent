@@ -301,23 +301,156 @@ async def test_unpin_request_cancels_pending_pin_next_so_the_card_never_pins():
     a._bot.pin_chat_message.assert_not_awaited()
 
 
+def _pending():
+    p = pr.requests_path()
+    return [json.loads(x) for x in p.read_text().splitlines() if x.strip()] if p.exists() else []
+
+
 @pytest.mark.asyncio
-async def test_final_edit_pins_the_edited_message():
+async def test_preamble_before_the_title_still_pins():
+    a = _adapter()
+    _write(_req(key="op-workout", match="Workout A"))
+    await _send(a, CHAT, "Here you go:\n\n**Workout A** Push\nrest", metadata=META)
+    a._bot.pin_chat_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pin_failure_puts_the_request_back_with_its_original_expiry_and_retry_pins():
+    a = _adapter()
+    a._bot.pin_chat_message = AsyncMock(side_effect=[RuntimeError("flaky"), True])
+    r = _req()
+    _write(r)
+    await _send(a, CHAT, "Morning brief one", metadata=META)
+    assert _pending() == [r]
+    assert pr.ledger_load() == {}
+    await _send(a, CHAT, "Morning brief two", metadata=META)
+    assert pr.ledger_load()["op-brief"]["message_id"] == "102"
+    assert _pending() == []
+
+
+@pytest.mark.asyncio
+async def test_requeued_request_cannot_pin_a_wrong_message():
+    a = _adapter()
+    a._bot.pin_chat_message = AsyncMock(side_effect=RuntimeError("flaky"))
+    _write(_req())
+    await _send(a, CHAT, "Morning brief", metadata=META)
+    a._bot.pin_chat_message = AsyncMock(return_value=True)
+    await _send(a, CHAT, "unrelated chatter", metadata=META)
+    await _send(a, CHAT, "Morning brief", metadata={"thread_id": "9"})
+    await _send(a, "-100999", "Morning brief", metadata=META)
+    a._bot.pin_chat_message.assert_not_awaited()
+    assert len(_pending()) == 1
+
+
+@pytest.mark.asyncio
+async def test_old_unpin_failure_requeues_the_request():
+    a = _adapter()
+    pr.ledger_put({"key": "op-brief", "chat_id": CHAT, "thread_id": THREAD, "message_id": "50",
+                   "pinned_at": _iso(-60), "unpin_at": None})
+    a._bot.unpin_chat_message = AsyncMock(side_effect=RuntimeError("Timed out"))
+    r = _req()
+    _write(r)
+    await _send(a, CHAT, "Morning brief", metadata=META)
+    assert _pending() == [r]
+
+
+@pytest.mark.asyncio
+async def test_corrupt_ledger_requeues_the_request(paths):
+    a = _adapter()
+    pr.ledger_path().write_text("garbage")
+    r = _req()
+    _write(r)
+    await _send(a, CHAT, "Morning brief", metadata=META)
+    assert _pending() == [r]
+
+
+@pytest.mark.asyncio
+async def test_a_hung_pin_call_times_out_alone_and_rolls_back():
+    a = _adapter()
+    a._PIN_API_TIMEOUT = 0.05
+
+    async def hang(*_a, **_k):
+        await asyncio.sleep(30)
+
+    a._bot.pin_chat_message = AsyncMock(side_effect=hang)
+    _write(_req())
+    res = await asyncio.wait_for(_send(a, CHAT, "Morning brief", metadata=META), timeout=5)
+    assert res.success
+    assert pr.ledger_load() == {}
+    assert len(_pending()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_hung_unpin_call_times_out_and_keeps_the_old_entry():
+    a = _adapter()
+    a._PIN_API_TIMEOUT = 0.05
+    pr.ledger_put({"key": "op-brief", "chat_id": CHAT, "thread_id": THREAD, "message_id": "50",
+                   "pinned_at": _iso(-60), "unpin_at": None})
+
+    async def hang(*_a, **_k):
+        await asyncio.sleep(30)
+
+    a._bot.unpin_chat_message = AsyncMock(side_effect=hang)
+    _write(_req())
+    await asyncio.wait_for(_send(a, CHAT, "Morning brief", metadata=META), timeout=5)
+    assert pr.ledger_load()["op-brief"]["message_id"] == "50"
+
+
+@pytest.mark.asyncio
+async def test_drain_is_bounded_and_does_not_cancel_the_task():
+    a = _adapter()
+    gate = asyncio.Event()
+
+    async def slow(*_a, **_k):
+        await gate.wait()
+
+    a._bot.pin_chat_message = AsyncMock(side_effect=slow)
+    _write(_req())
+    await a.send(CHAT, "Morning brief", metadata=META)
+    await asyncio.wait_for(a._drain_pin_tasks(timeout=0.05), timeout=2)
+    (task,) = list(a._pin_tasks)
+    assert not task.done() and not task.cancelled()
+    gate.set()
+    await a._drain_pin_tasks()
+    assert pr.ledger_load()["op-brief"]["message_id"] == "101"
+
+
+@pytest.mark.asyncio
+async def test_edit_message_has_no_pin_hook():
     a = _adapter()
     a._bot.edit_message_text = AsyncMock(return_value=MagicMock(message_id=900))
     _write(_req())
     await a.edit_message(CHAT, "900", "Morning brief Monday", finalize=True, metadata=META)
-    await a._drain_pin_tasks()
-    a._bot.pin_chat_message.assert_awaited_once()
-    assert a._bot.pin_chat_message.await_args.kwargs["message_id"] == 900
-    assert pr.ledger_load()["op-brief"]["message_id"] == "900"
+    assert not getattr(a, "_pin_tasks", None)
+    a._bot.pin_chat_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_interim_edit_does_not_pin():
+async def test_disconnect_drains_pin_tasks_bounded_without_cancelling():
+    from types import SimpleNamespace
     a = _adapter()
-    a._bot.edit_message_text = AsyncMock(return_value=MagicMock(message_id=900))
+    gate = asyncio.Event()
+
+    async def slow(*_a, **_k):
+        await gate.wait()
+
+    a._bot.pin_chat_message = AsyncMock(side_effect=slow)
     _write(_req())
-    await a.edit_message(CHAT, "900", "Morning brief Mon", finalize=False, metadata=META)
-    await a._drain_pin_tasks()
-    a._bot.pin_chat_message.assert_not_awaited()
+    await a.send(CHAT, "Morning brief", metadata=META)
+    (task,) = list(a._pin_tasks)
+    a._app = SimpleNamespace(updater=SimpleNamespace(running=False), running=False, shutdown=AsyncMock())
+    a._release_platform_lock = lambda: None
+    a._cancel_pending_delivery_tasks = AsyncMock()
+    drained = []
+    real = a._drain_pin_tasks
+
+    async def spy(timeout=None):
+        drained.append(timeout)
+        await real(timeout=0.05)
+
+    a._drain_pin_tasks = spy
+    await a.disconnect()
+    assert drained == [5]
+    assert not task.cancelled()
+    gate.set()
+    await real()
