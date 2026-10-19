@@ -3251,6 +3251,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             # gateway wraps in a connect timeout — means one slow call blows the whole connect and the
             # adapter never comes up, even though polling/webhook is already live (#46298).
             self._start_post_connect_housekeeping()
+            self._start_pin_loop()
             return True
         except Exception as e:
             self._release_platform_lock()
@@ -3416,6 +3417,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             await self._await_disconnect_step(
                 asyncio.gather(post_connect_task, return_exceptions=True), _DISCONNECT_STEP_TIMEOUT, "post-connect cancel")
         self._post_connect_task = None
+        await self._stop_pin_loop()
         # Cancel the heartbeat (and webhook-mode identity loop) before tearing down the app.
         await self._cancel_task_attr("_polling_heartbeat_task", "heartbeat cancel")
         await self._cancel_task_attr("_bot_identity_refresh_task", "identity-refresh cancel")
@@ -3656,7 +3658,71 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         # One chat at a time (held only around the API calls, never across the reconnect wait above), so
         # two concurrent split replies to one chat cannot interleave their chunks (#114396).
         async with self._chat_send_lock(chat_id):
-            return await self._send_text_locked(chat_id, content, reply_to, metadata)
+            result = await self._send_text_locked(chat_id, content, reply_to, metadata)
+        await self._pin_after_send(chat_id, content, metadata, result)
+        return result
+
+    # --- pin requests (file-driven; see pin_requests.py). Inert unless the requests/ledger files exist;
+    # every failure is logged and swallowed so pinning can never fail or hold up a send.
+    _PIN_LOOP_INTERVAL = 60.0
+
+    async def pin_message(self, chat_id: str, message_id: str) -> None:
+        await self._bot.pin_chat_message(chat_id=chat_id, message_id=int(message_id), disable_notification=True)
+
+    async def unpin_message(self, chat_id: str, message_id: str) -> None:
+        await self._bot.unpin_chat_message(chat_id=chat_id, message_id=int(message_id))
+
+    async def _pin_unpin_entries(self, entries: list) -> None:
+        for e in entries:
+            try:
+                await self.unpin_message(e["chat_id"], e["message_id"])
+            except Exception as exc:
+                logger.warning("[%s] pin: unpin of %s failed: %s", self.name, e.get("key"), _redact_telegram_error_text(exc))
+
+    async def _pin_maintenance(self) -> None:
+        try:
+            from plugins.platforms.telegram import pin_requests
+            await self._pin_unpin_entries(pin_requests.collect_due_unpins())
+        except Exception as exc:
+            logger.warning("[%s] pin: maintenance failed: %s", self.name, exc)
+
+    async def _pin_after_send(self, chat_id: str, content: str, metadata: Optional[dict[str, Any]], result: SendResult) -> None:
+        try:
+            from plugins.platforms.telegram import pin_requests
+            if not (result and result.success and result.message_id):
+                return
+            if not (pin_requests.requests_path().exists() or pin_requests.ledger_path().exists()):
+                return
+            await asyncio.wait_for(self._pin_after_send_inner(pin_requests, chat_id, content, metadata, result), timeout=15)
+        except Exception as exc:
+            logger.warning("[%s] pin: after-send hook failed: %s", self.name, exc)
+
+    async def _pin_after_send_inner(self, pin_requests, chat_id, content, metadata, result) -> None:
+        await self._pin_maintenance()
+        req = pin_requests.take_pin_for_send(str(chat_id), self._metadata_thread_id(metadata), content)
+        if not req:
+            return
+        old = pin_requests.ledger_pop(req["key"])
+        if old:
+            await self._pin_unpin_entries([old])
+        await self.pin_message(str(chat_id), result.message_id)
+        pin_requests.ledger_put(pin_requests.make_entry(req, result.message_id))
+
+    def _start_pin_loop(self, interval: Optional[float] = None) -> None:
+        old = getattr(self, "_pin_loop_task", None)
+        if old and not old.done():
+            return
+        period = interval or self._PIN_LOOP_INTERVAL
+
+        async def _loop():
+            while True:
+                await asyncio.sleep(period)
+                await self._pin_maintenance()
+
+        self._pin_loop_task = asyncio.get_running_loop().create_task(_loop())
+
+    async def _stop_pin_loop(self) -> None:
+        await self._cancel_task_attr("_pin_loop_task", "pin-loop cancel")
 
     async def _send_text_locked(
         self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]]) -> SendResult:
