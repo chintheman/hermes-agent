@@ -47,12 +47,12 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 ID_PATTERN = r"[0-9A-Za-z_-]{8,64}"
-ID_RE = re.compile(r"^%s$" % ID_PATTERN)
+ID_RE = re.compile(rf"^{ID_PATTERN}$")
 # {"verbatim_id": "<id>"}, also when the JSON sits escaped inside another JSON string (\"verbatim_id\": \"<id>\").
-_JSON_ID = re.compile(r'verbatim_id\\*"\s*:\s*\\*"(%s)\\*"' % ID_PATTERN)
-_MARKER_ID = re.compile(r"\[verbatim (%s)\]" % ID_PATTERN)
-_MARKER_LINE = re.compile(r"(?m)^[ \t]*\[verbatim %s\][ \t]*(?:\n|$)" % ID_PATTERN)
-_MARKER_INLINE = re.compile(r"[ \t]?\[verbatim %s\]" % ID_PATTERN)
+_JSON_ID = re.compile(rf'verbatim_id\\*"\s*:\s*\\*"({ID_PATTERN})\\*"')
+_MARKER_ID = re.compile(rf"\[verbatim ({ID_PATTERN})\]")
+_MARKER_LINE = re.compile(rf"(?m)^[ \t]*\[verbatim {ID_PATTERN}\][ \t]*(?:\n|$)")
+_MARKER_INLINE = re.compile(rf"[ \t]?\[verbatim {ID_PATTERN}\]")
 
 # Only these tools can carry a fresh id: they run the coach scripts. Other tools may echo an old one.
 ID_TOOLS = {"terminal", "process", "process_manage", "execute_code"}
@@ -74,12 +74,12 @@ _LOCKED_TEXT_PATH = re.compile(
 
 _LOCK = threading.Lock()
 # (session_id, turn_id) -> {"ts": float, "ids": [..], "texts": [..]}
-_PENDING: "OrderedDict[tuple, dict]" = OrderedDict()
+_PENDING: OrderedDict[tuple, dict] = OrderedDict()
 # (session_id, turn_id) -> latest user message of that turn; session_id -> latest user message of the session
-_USER_BY_TURN: "OrderedDict[tuple, str]" = OrderedDict()
-_USER_BY_SESSION: "OrderedDict[str, str]" = OrderedDict()
+_USER_BY_TURN: OrderedDict[tuple, str] = OrderedDict()
+_USER_BY_SESSION: OrderedDict[str, str] = OrderedDict()
 # ids already delivered (never delivered twice)
-_DELIVERED: "OrderedDict[str, float]" = OrderedDict()
+_DELIVERED: OrderedDict[str, float] = OrderedDict()
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ def _hermes_home() -> Path:
         from hermes_constants import get_hermes_home
 
         return Path(get_hermes_home())
-    except Exception:  # noqa: BLE001 - the plugin must load even when the helper cannot
+    except Exception:
         return Path(os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"))
 
 
@@ -202,7 +202,7 @@ def _on_transform_tool_result(
                     continue
                 entry["texts"].append(text)
                 entry["ts"] = now
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("verbatim-reply transform_tool_result failed (non-fatal): %s", exc)
     return None
 
@@ -216,18 +216,18 @@ _PROTECTED = re.compile(
     r"```.*?(?:```|\Z)|~~~.*?(?:~~~|\Z)|`{1,2}[^`\n]+`{1,2}|\S*://\S*|\bt\.me/\S*", re.DOTALL)
 _DASH = "—–"
 _MON = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?"
-_DATE = r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}[ \t]+%s|%s[ \t]+\d{1,2})" % (_MON, _MON)
+_DATE = rf"(?:\d{{4}}-\d{{2}}-\d{{2}}|\d{{1,2}}[ \t]+{_MON}|{_MON}[ \t]+\d{{1,2}})"
 
 
 def _scrub_plain(s: str) -> str:
-    s = re.sub(r"(\|[ \t]*)[%s]([ \t]*(?=\|))" % _DASH, r"\1-\2", s)                 # a table cell that is only a dash
-    s = re.sub(r"(%s)[ \t]*[%s][ \t]*(?=%s)" % (_DATE, _DASH, _DATE), r"\1 to ", s)   # date to date
-    s = re.sub(r"(%s[ \t]+\d{1,2})[ \t]*[%s][ \t]*(?=\d{1,2}\b)" % (_MON, _DASH), r"\1 to ", s)   # Oct 5 - 7
-    s = re.sub(r"(?m)^([ \t]*)[%s][ \t]+" % _DASH, r"\1- ", s)          # a dash used as a bullet
-    s = re.sub(r"(?m)[ \t]*[%s][ \t]*$" % _DASH, "", s)                 # a dash that ends a line
-    s = re.sub(r"(?<=\d)[ \t]*[%s][ \t]*(?=\d)" % _DASH, "-", s)        # 5-7, 5 - 7
-    s = re.sub(r"[ \t]+[%s][ \t]+" % _DASH, ", ", s)                    # " - " as a pause
-    s = re.sub(r"[ \t]*[%s][ \t]*" % _DASH, ", ", s)                    # any other
+    s = re.sub(rf"(\|[ \t]*)[{_DASH}]([ \t]*(?=\|))", r"\1-\2", s)                 # a table cell that is only a dash
+    s = re.sub(rf"({_DATE})[ \t]*[{_DASH}][ \t]*(?={_DATE})", r"\1 to ", s)   # date to date
+    s = re.sub(rf"({_MON}[ \t]+\d{{1,2}})[ \t]*[{_DASH}][ \t]*(?=\d{{1,2}}\b)", r"\1 to ", s)   # Oct 5 - 7
+    s = re.sub(rf"(?m)^([ \t]*)[{_DASH}][ \t]+", r"\1- ", s)          # a dash used as a bullet
+    s = re.sub(rf"(?m)[ \t]*[{_DASH}][ \t]*$", "", s)                 # a dash that ends a line
+    s = re.sub(rf"(?<=\d)[ \t]*[{_DASH}][ \t]*(?=\d)", "-", s)        # 5-7, 5 - 7
+    s = re.sub(rf"[ \t]+[{_DASH}][ \t]+", ", ", s)                    # " - " as a pause
+    s = re.sub(rf"[ \t]*[{_DASH}][ \t]*", ", ", s)                    # any other
     return re.sub(r",(?:[ \t]*,)+", ",", s)
 
 
@@ -238,7 +238,7 @@ def scrub_dashes(text: str) -> str:
 
     def hold(m):
         kept.append(m.group(0))
-        return "\ue000%d\ue001" % (len(kept) - 1)
+        return f"\ue000{len(kept) - 1}\ue001"
 
     out = _scrub_plain(_PROTECTED.sub(hold, text))
     return re.sub("\ue000(\\d+)\ue001", lambda m: kept[int(m.group(1))], out)
@@ -283,7 +283,7 @@ def _on_transform_llm_output(
             fixed = scrub_dashes(fixed)
         if fixed != response_text and fixed.strip():
             return fixed
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("verbatim-reply transform_llm_output failed (non-fatal): %s", exc)
     return None
 
@@ -310,7 +310,7 @@ def _on_pre_llm_call(session_id: str = "", turn_id: str = "", user_message: Any 
     try:
         text = _message_text(user_message)
         if not session_id or not text.strip():
-            return None
+            return
         with _LOCK:
             _USER_BY_SESSION[session_id] = text
             _USER_BY_SESSION.move_to_end(session_id)
@@ -320,9 +320,9 @@ def _on_pre_llm_call(session_id: str = "", turn_id: str = "", user_message: Any 
                 _USER_BY_TURN[(session_id, turn_id)] = text
                 while len(_USER_BY_TURN) > USER_MSG_MAX:
                     _USER_BY_TURN.popitem(last=False)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("verbatim-reply pre_llm_call failed (non-fatal): %s", exc)
-    return None
+    return
 
 
 def _latest_user(session_id: str, turn_id: str) -> str:
@@ -446,7 +446,7 @@ def path_is_locked(path: Any) -> bool:
     for make in (os.path.realpath, lambda x: os.path.realpath(os.path.abspath(x))):
         try:
             candidates.add(make(p).replace(os.sep, "/"))
-        except Exception:  # noqa: BLE001 - an unresolvable path is judged on its text alone
+        except Exception:
             pass
     roots = [r.replace(os.sep, "/") for r in _locked_roots()]
     for c in candidates | {plain}:
@@ -489,7 +489,7 @@ def _on_pre_tool_call(
         if is_locked_call(tool_name, args):
             logger.info("verbatim-reply: blocked %s on a locked skill", tool_name)
             return {"action": "block", "message": SKILL_LOCK_MESSAGE}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.debug("verbatim-reply skill lock check failed: %s", exc)
     try:
         if tool_name == "terminal" and isinstance(args, dict) and isinstance(args.get("command"), str):
@@ -499,7 +499,7 @@ def _on_pre_tool_call(
                 if msg:
                     logger.info("verbatim-reply: blocked an add-note that is not Chin's words")
                     return {"action": "block", "message": msg}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.info("verbatim-reply: add-note check failed, blocking: %s", exc)
         return {"action": "block", "message": NOTE_BLOCK_MESSAGE}
     return None

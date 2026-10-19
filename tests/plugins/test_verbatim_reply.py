@@ -75,40 +75,40 @@ class TestToolResult:
 
     def test_marker_lines_first_and_last_dedupe_to_one(self, vr):
         stage(vr, ID1, "**Done**\nline")
-        out = "[verbatim %s]\n**Done**\nline\n[verbatim %s]" % (ID1, ID1)
+        out = f"[verbatim {ID1}]\n**Done**\nline\n[verbatim {ID1}]"
         self.run(vr, json.dumps({"output": out}))
         assert vr._PENDING[("s1", "t1")]["texts"] == ["**Done**\nline"]
 
     def test_marker_survives_head_or_tail(self, vr):
         stage(vr, ID1, "body")
-        self.run(vr, "[verbatim %s]\nbody" % ID1)
-        self.run(vr, "body\n[verbatim %s]" % ID1, turn="t2")
+        self.run(vr, f"[verbatim {ID1}]\nbody")
+        self.run(vr, f"body\n[verbatim {ID1}]", turn="t2")
         assert vr._PENDING[("s1", "t1")]["texts"] == vr._PENDING[("s1", "t2")]["texts"] == ["body"]
 
     def test_order_is_kept_and_ids_are_deduped_across_calls(self, vr):
         stage(vr, ID1, "first")
         stage(vr, ID2, "second")
-        self.run(vr, "[verbatim %s]" % ID1)
-        self.run(vr, "[verbatim %s] [verbatim %s]" % (ID2, ID1))
+        self.run(vr, f"[verbatim {ID1}]")
+        self.run(vr, f"[verbatim {ID2}] [verbatim {ID1}]")
         assert vr._PENDING[("s1", "t1")]["texts"] == ["first", "second"]
 
     def test_keyed_by_session_and_turn(self, vr):
         stage(vr, ID1, "a")
-        self.run(vr, "[verbatim %s]" % ID1, session="s1", turn="t1")
+        self.run(vr, f"[verbatim {ID1}]", session="s1", turn="t1")
         assert ("s1", "t1") in vr._PENDING
         assert ("s2", "t1") not in vr._PENDING and ("s1", "t2") not in vr._PENDING
 
     @pytest.mark.parametrize("vid", ["../../etc/passwd", "short", "a" * 65, "has space in it", "ok_id_01/../x"])
     def test_bad_ids_are_ignored(self, vr, vid):
         self.run(vr, json.dumps({"verbatim_id": vid}))
-        self.run(vr, "[verbatim %s]" % vid)
+        self.run(vr, f"[verbatim {vid}]")
         assert not vr._PENDING
 
     def test_symlink_escape_is_refused(self, vr, tmp_path):
         secret = tmp_path / "outside.md"
         secret.write_text("SECRET")
         os.symlink(secret, vr.verbatim_dir() / (ID1 + ".md"))
-        self.run(vr, "[verbatim %s]" % ID1)
+        self.run(vr, f"[verbatim {ID1}]")
         assert not vr._PENDING
         assert vr.read_staged(ID1) is None
 
@@ -118,7 +118,7 @@ class TestToolResult:
         past = time.time() - 7200
         os.utime(old, (past, past))
         for vid in (ID1, ID2, "20250101T000000Zaaaaaaaa"):
-            self.run(vr, "[verbatim %s]" % vid)
+            self.run(vr, f"[verbatim {vid}]")
         assert not vr._PENDING
 
     def test_fails_open_on_anything_odd(self, vr, monkeypatch):
@@ -129,7 +129,7 @@ class TestToolResult:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(vr, "read_staged", boom)
-        assert self.run(vr, "[verbatim %s]" % ID1) is None
+        assert self.run(vr, f"[verbatim {ID1}]") is None
 
     def test_default_dir_follows_hermes_home(self, tmp_path, monkeypatch):
         monkeypatch.delenv("HWC_VERBATIM_DIR", raising=False)
@@ -408,7 +408,7 @@ def test_end_to_end_tool_result_to_final_reply(vr, monkeypatch):
     card = ("**Done · Sun 18 Oct**\n\n| Movement | Done |\n|---|---|\n| row | 3 sets |\n\n"
             "⚠️ Unresolved: Curl.\nall jobs ran · vabc1234")
     stage(vr, ID1, card)
-    raw = json.dumps({"output": "[verbatim %s]\n%s\n[verbatim %s]" % (ID1, card, ID1), "exit_code": 0})
+    raw = json.dumps({"output": f"[verbatim {ID1}]\n{card}\n[verbatim {ID1}]", "exit_code": 0})
 
     ids = model_tools._CallIds(task_id="task", session_id="sess-1", tool_call_id="call-1", turn_id="turn-1")
     assert model_tools._apply_transform_tool_result_hook("terminal", {"command": "coach_engine.py card"}, raw, 5, ids) == raw
@@ -455,49 +455,49 @@ class TestReviewFixes:
     def test_same_text_under_two_ids_is_sent_once(self, vr):
         stage(vr, ID1, "the card\n")
         stage(vr, ID2, "the card")
-        self.tool(vr, "[verbatim %s]" % ID1)
-        self.tool(vr, "[verbatim %s]" % ID2)
+        self.tool(vr, f"[verbatim {ID1}]")
+        self.tool(vr, f"[verbatim {ID2}]")
         assert vr._PENDING[("s1", "t1")]["texts"] == ["the card"]
         assert self.out(vr) == "the card"
 
     def test_different_texts_are_both_kept(self, vr):
         stage(vr, ID1, "one")
         stage(vr, ID2, "two")
-        self.tool(vr, "[verbatim %s]" % ID1)
-        self.tool(vr, "[verbatim %s]" % ID2)
+        self.tool(vr, f"[verbatim {ID1}]")
+        self.tool(vr, f"[verbatim {ID2}]")
         assert self.out(vr) == "one\n\ntwo"
 
     # 2. only terminal, process and execute_code tools; never twice
     @pytest.mark.parametrize("name", ["read_file", "session_search", "web_extract", "web_search", "search_files", ""])
     def test_ids_from_other_tools_are_ignored(self, vr, name):
         stage(vr, ID1, "old card")
-        self.tool(vr, "[verbatim %s]" % ID1, name=name)
+        self.tool(vr, f"[verbatim {ID1}]", name=name)
         assert not vr._PENDING
 
     @pytest.mark.parametrize("name", ["terminal", "process", "process_manage", "execute_code"])
     def test_ids_from_the_script_running_tools_are_taken(self, vr, name):
         stage(vr, ID1, "fresh card")
-        self.tool(vr, "[verbatim %s]" % ID1, name=name)
+        self.tool(vr, f"[verbatim {ID1}]", name=name)
         assert vr._PENDING[("s1", "t1")]["texts"] == ["fresh card"]
 
     def test_a_delivered_id_is_never_delivered_twice(self, vr):
         stage(vr, ID1, "card")
-        self.tool(vr, "[verbatim %s]" % ID1)
+        self.tool(vr, f"[verbatim {ID1}]")
         assert self.out(vr) == "card"
-        self.tool(vr, "[verbatim %s]" % ID1, turn="t2")      # an old id echoed in a later turn
+        self.tool(vr, f"[verbatim {ID1}]", turn="t2")      # an old id echoed in a later turn
         assert not vr._PENDING
         assert self.out(vr, turn="t2") is None
 
     def test_the_delivered_set_is_bounded(self, vr):
         for i in range(vr.DELIVERED_MAX + 30):
-            vr._remember_delivered(["id%08d" % i], time.time())
+            vr._remember_delivered([f"id{i:08d}"], time.time())
         assert len(vr._DELIVERED) == vr.DELIVERED_MAX
-        assert "id%08d" % 0 not in vr._DELIVERED
+        assert "id00000000" not in vr._DELIVERED
 
     # 3. lookup fallback and warnings
     def test_lookup_falls_back_to_the_single_entry_with_that_turn_id(self, vr, caplog):
         stage(vr, ID1, "card")
-        self.tool(vr, "[verbatim %s]" % ID1, session="old-session", turn="t9")
+        self.tool(vr, f"[verbatim {ID1}]", session="old-session", turn="t9")
         with caplog.at_level(logging.INFO):
             assert self.out(vr, session="compressed-session", turn="t9") == "card"
         assert "session id changed mid-turn" in caplog.text
@@ -526,17 +526,17 @@ class TestReviewFixes:
 
     # 4. marker lines are stripped from every final text
     def test_marker_lines_are_stripped_even_without_scripted_text(self, vr):
-        text = "[verbatim %s]\nhello\n[verbatim %s]" % (ID1, ID1)
+        text = f"[verbatim {ID1}]\nhello\n[verbatim {ID1}]"
         assert self.out(vr, text, platform="cli") == "hello\n"
 
     def test_inline_marker_and_telegram_scrub_together(self, vr):
-        assert self.out(vr, "see [verbatim %s] this — now" % ID1) == "see this, now"
+        assert self.out(vr, f"see [verbatim {ID1}] this — now") == "see this, now"
 
     def test_a_non_marker_bracket_is_kept(self, vr):
         assert self.out(vr, "[verbatim short] and [verbatim] ok", platform="cli") is None
 
     def test_scripted_text_has_markers_stripped_too(self, vr):
-        vr._PENDING[("s1", "t1")] = {"ts": time.time(), "ids": [ID1], "texts": ["a [verbatim %s]" % ID1]}
+        vr._PENDING[("s1", "t1")] = {"ts": time.time(), "ids": [ID1], "texts": [f"a [verbatim {ID1}]"]}
         assert self.out(vr) == "a"
 
     # 5. add-note guard
