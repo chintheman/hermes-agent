@@ -64,6 +64,72 @@ def test_expired_request_is_dropped_not_matched():
     assert pending_lines() == []
 
 
+def test_match_must_be_at_the_start_of_the_message():
+    write_requests(req())
+    # a reply that quotes the brief must not take the pin
+    assert pr.take_pin_for_send(CHAT, THREAD, "You asked about the Morning brief earlier", now=NOW) is None
+    assert pr.take_pin_for_send(CHAT, THREAD, "> Morning brief\nThanks", now=NOW) is None
+    assert len(pending_lines()) == 1
+    assert pr.take_pin_for_send(CHAT, THREAD, "  **Morning brief** Mon", now=NOW)["key"] == "op-brief"
+
+
+def test_unpin_request_also_deletes_earlier_pending_pin_next_for_same_key():
+    write_requests(req(key="op-workout", match="Workout A"), req(key="op-brief"),
+                   {"op": "unpin", "key": "op-workout", "requested_at": iso(1)},
+                   req(key="op-workout", match="Workout B"))   # a LATER draw must survive
+    pr.collect_due_unpins(now=NOW)
+    left = pending_lines()
+    assert [(r["key"], r["match"]) for r in left] == [("op-brief", "Morning brief"), ("op-workout", "Workout B")]
+
+
+def test_corrupt_ledger_is_never_overwritten_and_keeps_a_backup(paths):
+    pr.ledger_path().write_text("{not json")
+    with pytest.raises(pr.LedgerCorrupt):
+        pr.ledger_put({"key": "k", "chat_id": CHAT, "thread_id": THREAD, "message_id": "1",
+                       "pinned_at": iso(0), "unpin_at": None})
+    with pytest.raises(pr.LedgerCorrupt):
+        pr.ledger_pop("k")
+    assert pr.ledger_path().read_text() == "{not json"
+    assert (paths / "pins.json.bak").read_text() == "{not json"
+
+
+def test_corrupt_ledger_leaves_unpin_requests_pending(paths):
+    pr.ledger_path().write_text("[1, 2")
+    write_requests({"op": "unpin", "key": "op-workout", "requested_at": iso(1)})
+    assert pr.collect_due_unpins(now=NOW) == []
+    assert len(pending_lines()) == 1
+    assert pr.ledger_path().read_text() == "[1, 2"
+
+
+def test_nothing_changed_means_no_rewrite(paths):
+    write_requests(req(key="later", expires=600))
+    before = pr.requests_path().stat()
+    import time
+    time.sleep(0.02)
+    assert pr.collect_due_unpins(now=NOW) == []
+    assert pr.take_pin_for_send(CHAT, THREAD, "unrelated", now=NOW) is None
+    after = pr.requests_path().stat()
+    assert (after.st_mtime_ns, after.st_ino) == (before.st_mtime_ns, before.st_ino)
+
+
+def test_empty_requests_file_returns_early(paths):
+    pr.requests_path().write_text("")
+    before = pr.requests_path().stat().st_mtime_ns
+    assert pr.collect_due_unpins(now=NOW) == []
+    assert pr.requests_path().stat().st_mtime_ns == before
+
+
+def test_default_data_dir_comes_from_hermes_home(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_PIN_REQUESTS")
+    monkeypatch.delenv("HERMES_PIN_LEDGER")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
+    assert pr.requests_path() == tmp_path / "h" / "data" / "pin-requests.jsonl"
+    assert pr.ledger_path() == tmp_path / "h" / "data" / "pins.json"
+    monkeypatch.delenv("HERMES_HOME")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert pr.requests_path() == tmp_path / ".hermes" / "data" / "pin-requests.jsonl"
+
+
 def test_missing_file_is_inert(paths):
     assert pr.take_pin_for_send(CHAT, THREAD, "Morning brief", now=NOW) is None
     assert pr.collect_due_unpins(now=NOW) == []
