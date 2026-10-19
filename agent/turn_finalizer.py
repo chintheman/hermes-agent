@@ -481,7 +481,7 @@ def _apply_output_hooks(
 
 
 def apply_llm_output_transform(
-    agent, final_response, *, turn_id, platform=None, logger=None,
+    agent, final_response, *, turn_id, platform=None, logger=None, allow_empty=False,
 ) -> tuple[Any, bool, Optional[Any]]:
     """Fire ``transform_llm_output`` once per turn and return
     ``(final_response, transformed, pre_transform_response)``.
@@ -494,14 +494,18 @@ def apply_llm_output_transform(
     write can never reach the durable store. Idempotent per ``turn_id``: later callers in the
     same turn get the recorded outcome instead of a second hook firing. Only the current
     turn's not-yet-written text is touched — earlier turns and the system prompt are never
-    rewritten (prompt-cache invariant)."""
+    rewritten (prompt-cache invariant).
+
+    ``allow_empty``: ask the hook even when the reply is empty, so a plugin that already holds the
+    text (a scripted message) can supply it. Only a string result counts, and an empty outcome is
+    never recorded, so a later call in the same turn with real text still fires the hook."""
     if logger is None:
         from agent.conversation_loop import logger
     recorded = getattr(agent, "_llm_output_transform", None)
     if isinstance(recorded, tuple) and len(recorded) == 3 and recorded[0] == turn_id:
         _, transformed, pre_transform = recorded
         return final_response, transformed, pre_transform
-    if not final_response:
+    if not final_response and not allow_empty:
         return final_response, False, None
     if platform is None:
         platform = getattr(agent, "platform", None) or ""
@@ -518,7 +522,8 @@ def apply_llm_output_transform(
         if isinstance(_hook_result, str) and _hook_result:
             pre_transform, final_response, transformed = final_response, _hook_result, True
             break
-    agent._llm_output_transform = (turn_id, transformed, pre_transform)
+    if transformed or final_response:
+        agent._llm_output_transform = (turn_id, transformed, pre_transform)
     return final_response, transformed, pre_transform
 
 
@@ -649,6 +654,13 @@ def finalize_turn(
     if not interrupted:
         final_response = _explain_abnormal_exit(
             agent, final_response, _turn_exit_reason, preserved_verification_fallback, logger,
+        )
+
+    if not final_response and not interrupted:
+        # An empty reply: a plugin holding the text (a scripted message) may still supply it. The outcome
+        # is recorded, so the block below returns it instead of firing the hook a second time.
+        final_response, _, _ = apply_llm_output_transform(
+            agent, final_response, turn_id=turn_id, logger=logger, allow_empty=True,
         )
 
     _platform = getattr(agent, "platform", None) or ""

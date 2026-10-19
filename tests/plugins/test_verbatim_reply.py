@@ -35,11 +35,13 @@ def vr(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setenv("HERMES_VERBATIM_DIR", str(tmp_path / "verbatim"))
+    monkeypatch.setenv("HWC_VERBATIM_DIR", str(tmp_path / "verbatim"))
     (tmp_path / "verbatim").mkdir()
     mod = _load()
     mod._PENDING.clear()
-    mod._LATEST_USER.clear()
+    mod._USER_BY_TURN.clear()
+    mod._USER_BY_SESSION.clear()
+    mod._DELIVERED.clear()
     return mod
 
 
@@ -130,7 +132,7 @@ class TestToolResult:
         assert self.run(vr, "[verbatim %s]" % ID1) is None
 
     def test_default_dir_follows_hermes_home(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("HERMES_VERBATIM_DIR", raising=False)
+        monkeypatch.delenv("HWC_VERBATIM_DIR", raising=False)
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         assert _load().verbatim_dir() == tmp_path / "data" / "op" / "verbatim"
 
@@ -436,3 +438,233 @@ def test_end_to_end_two_tool_calls_in_one_turn(vr, monkeypatch):
     agent = SimpleNamespace(session_id="sess-1", model="m", platform="telegram")
     text, transformed, _ = apply_llm_output_transform(agent, "done", turn_id="turn-9", platform="telegram", logger=logging.getLogger("t"))
     assert text == "Renamed Row to cable seated row.\n\nRenamed Curl to barbell curl." and transformed
+
+
+# ---------------------------------------------------------------------------
+# Round 3 review fixes
+# ---------------------------------------------------------------------------
+
+class TestReviewFixes:
+    def tool(self, vr, result, name="terminal", session="s1", turn="t1"):
+        return vr._on_transform_tool_result(tool_name=name, args={}, result=result, session_id=session, turn_id=turn)
+
+    def out(self, vr, text="model words", platform="telegram", session="s1", turn="t1"):
+        return vr._on_transform_llm_output(response_text=text, session_id=session, model="m", platform=platform, turn_id=turn)
+
+    # 1. dedupe by text
+    def test_same_text_under_two_ids_is_sent_once(self, vr):
+        stage(vr, ID1, "the card\n")
+        stage(vr, ID2, "the card")
+        self.tool(vr, "[verbatim %s]" % ID1)
+        self.tool(vr, "[verbatim %s]" % ID2)
+        assert vr._PENDING[("s1", "t1")]["texts"] == ["the card"]
+        assert self.out(vr) == "the card"
+
+    def test_different_texts_are_both_kept(self, vr):
+        stage(vr, ID1, "one")
+        stage(vr, ID2, "two")
+        self.tool(vr, "[verbatim %s]" % ID1)
+        self.tool(vr, "[verbatim %s]" % ID2)
+        assert self.out(vr) == "one\n\ntwo"
+
+    # 2. only terminal, process and execute_code tools; never twice
+    @pytest.mark.parametrize("name", ["read_file", "session_search", "web_extract", "web_search", "search_files", ""])
+    def test_ids_from_other_tools_are_ignored(self, vr, name):
+        stage(vr, ID1, "old card")
+        self.tool(vr, "[verbatim %s]" % ID1, name=name)
+        assert not vr._PENDING
+
+    @pytest.mark.parametrize("name", ["terminal", "process", "process_manage", "execute_code"])
+    def test_ids_from_the_script_running_tools_are_taken(self, vr, name):
+        stage(vr, ID1, "fresh card")
+        self.tool(vr, "[verbatim %s]" % ID1, name=name)
+        assert vr._PENDING[("s1", "t1")]["texts"] == ["fresh card"]
+
+    def test_a_delivered_id_is_never_delivered_twice(self, vr):
+        stage(vr, ID1, "card")
+        self.tool(vr, "[verbatim %s]" % ID1)
+        assert self.out(vr) == "card"
+        self.tool(vr, "[verbatim %s]" % ID1, turn="t2")      # an old id echoed in a later turn
+        assert not vr._PENDING
+        assert self.out(vr, turn="t2") is None
+
+    def test_the_delivered_set_is_bounded(self, vr):
+        for i in range(vr.DELIVERED_MAX + 30):
+            vr._remember_delivered(["id%08d" % i], time.time())
+        assert len(vr._DELIVERED) == vr.DELIVERED_MAX
+        assert "id%08d" % 0 not in vr._DELIVERED
+
+    # 3. lookup fallback and warnings
+    def test_lookup_falls_back_to_the_single_entry_with_that_turn_id(self, vr, caplog):
+        stage(vr, ID1, "card")
+        self.tool(vr, "[verbatim %s]" % ID1, session="old-session", turn="t9")
+        with caplog.at_level(logging.INFO):
+            assert self.out(vr, session="compressed-session", turn="t9") == "card"
+        assert "session id changed mid-turn" in caplog.text
+
+    def test_no_fallback_when_two_entries_share_the_turn_id(self, vr):
+        vr._PENDING[("a", "t9")] = {"ts": time.time(), "ids": [ID1], "texts": ["a"]}
+        vr._PENDING[("b", "t9")] = {"ts": time.time(), "ids": [ID2], "texts": ["b"]}
+        assert self.out(vr, session="c", turn="t9") is None
+
+    def test_a_miss_while_entries_exist_warns(self, vr, caplog):
+        vr._PENDING[("a", "t1")] = {"ts": time.time(), "ids": [ID1], "texts": ["a"]}
+        with caplog.at_level(logging.WARNING):
+            assert self.out(vr, session="b", turn="t2") is None
+        assert "no scripted entry" in caplog.text
+
+    def test_no_warning_when_nothing_waits(self, vr, caplog):
+        with caplog.at_level(logging.WARNING):
+            self.out(vr)
+        assert "verbatim-reply" not in caplog.text
+
+    def test_an_entry_that_expires_undelivered_warns(self, vr, caplog):
+        vr._PENDING[("a", "t1")] = {"ts": time.time() - 3600, "ids": [ID1], "texts": ["a"]}
+        with caplog.at_level(logging.WARNING):
+            self.out(vr, session="b", turn="t2")
+        assert "expired undelivered" in caplog.text
+
+    # 4. marker lines are stripped from every final text
+    def test_marker_lines_are_stripped_even_without_scripted_text(self, vr):
+        text = "[verbatim %s]\nhello\n[verbatim %s]" % (ID1, ID1)
+        assert self.out(vr, text, platform="cli") == "hello\n"
+
+    def test_inline_marker_and_telegram_scrub_together(self, vr):
+        assert self.out(vr, "see [verbatim %s] this — now" % ID1) == "see this, now"
+
+    def test_a_non_marker_bracket_is_kept(self, vr):
+        assert self.out(vr, "[verbatim short] and [verbatim] ok", platform="cli") is None
+
+    def test_scripted_text_has_markers_stripped_too(self, vr):
+        vr._PENDING[("s1", "t1")] = {"ts": time.time(), "ids": [ID1], "texts": ["a [verbatim %s]" % ID1]}
+        assert self.out(vr) == "a"
+
+    # 5. add-note guard
+    def pre(self, vr, cmd, session="s1", turn="t1"):
+        return vr._on_pre_tool_call(tool_name="terminal", args={"command": cmd}, session_id=session, turn_id=turn)
+
+    def say(self, vr, msg, session="s1", turn="t1"):
+        vr._on_pre_llm_call(session_id=session, turn_id=turn, user_message=msg)
+
+    def test_grep_for_the_verb_is_not_a_call(self, vr):
+        assert self.pre(vr, "grep add-note coach_log.py") is None
+        assert self.pre(vr, "grep -n add-note ~/x/scripts/coach_log.py") is None
+        assert self.pre(vr, "cat coach_log.py | grep add-note") is None
+        assert self.pre(vr, "sed -n 1,20p coach_log.py # add-note") is None
+
+    def test_a_python_call_is_still_checked(self, vr):
+        self.say(vr, "knee felt fine")
+        assert self.pre(vr, "python3 coach_log.py add-note --text 'invented words'") == NOTE_BLOCK
+        assert self.pre(vr, "python coach_log.py add-note --text 'invented words'") == NOTE_BLOCK
+        assert self.pre(vr, "python3 -u ~/s/coach_log.py add-note --date D --text 'invented words'") == NOTE_BLOCK
+        assert self.pre(vr, "python3 coach_log.py add-note --text 'knee felt fine'") is None
+
+    def test_word_boundaries(self, vr):
+        self.say(vr, "knee felt fine")
+        assert self.pre(vr, "python3 coach_log.py add-notes --text 'invented words'") is None   # a different token
+        assert self.pre(vr, "python3 my_coach_log.py_old add-note --text 'x y'") is None
+
+    def test_one_word_text_is_blocked(self, vr):
+        self.say(vr, "knee")
+        assert self.pre(vr, "python3 coach_log.py add-note --text knee") == NOTE_BLOCK
+        self.say(vr, "knee felt fine")
+        assert self.pre(vr, "python3 coach_log.py add-note --text 'knee felt'") is None
+
+    def test_latest_user_message_is_keyed_by_turn_with_session_fallback(self, vr):
+        self.say(vr, "turn one words here", turn="t1")
+        self.say(vr, "turn two words here", turn="t2")
+        assert self.pre(vr, "python3 coach_log.py add-note --text 'turn two words'", turn="t2") is None
+        assert self.pre(vr, "python3 coach_log.py add-note --text 'turn one words'", turn="t2") == NOTE_BLOCK
+        assert self.pre(vr, "python3 coach_log.py add-note --text 'turn one words'", turn="t1") is None
+        # unknown turn: the session's latest message
+        assert self.pre(vr, "python3 coach_log.py add-note --text 'turn two words'", turn="t3") is None
+        # session id changed but the turn is known
+        assert self.pre(vr, "python3 coach_log.py add-note --text 'turn one words'", session="other", turn="t1") is None
+
+    def test_unparseable_python_call_blocks_but_a_grep_with_bad_quotes_does_not(self, vr):
+        self.say(vr, "knee felt fine")
+        assert self.pre(vr, "python3 coach_log.py add-note --text 'unterminated") == NOTE_BLOCK
+        assert self.pre(vr, "grep 'add-note coach_log.py") is None
+
+    # 6. dash scrub
+    @pytest.mark.parametrize("src", [
+        "see https://example.com/a–b now",
+        "link http://x.y/z—w here",
+        "open t.me/c/123–456 please",
+        "ftp://host/a—b and more",
+    ])
+    def test_urls_are_untouched(self, vr, src):
+        assert vr.scrub_dashes(src) == src
+
+    def test_text_around_a_url_is_still_scrubbed(self, vr):
+        assert vr.scrub_dashes("a — https://x.io/a–b — b") == "a, https://x.io/a–b, b"
+
+    def test_table_cell_that_is_only_a_dash_becomes_a_hyphen(self, vr):
+        src = "| Move | Done |\n|---|---|\n| row | — |\n| curl | – |"
+        assert vr.scrub_dashes(src) == "| Move | Done |\n|---|---|\n| row | - |\n| curl | - |"
+
+    @pytest.mark.parametrize("src,want", [
+        ("2026-10-05 – 2026-10-07", "2026-10-05 to 2026-10-07"),
+        ("2026-10-05—2026-10-07", "2026-10-05 to 2026-10-07"),
+        ("Oct 5 – Oct 7", "Oct 5 to Oct 7"),
+        ("Oct 5–Oct 7", "Oct 5 to Oct 7"),
+        ("5 Oct – 7 Oct", "5 Oct to 7 Oct"),
+        ("Oct 5 – 7", "Oct 5 to 7"),
+        ("away Oct 24—28 now", "away Oct 24 to 28 now"),
+        ("weeks 3–4", "weeks 3-4"),
+        ("a pause — here", "a pause, here"),
+    ])
+    def test_dates(self, vr, src, want):
+        assert vr.scrub_dashes(src) == want
+
+    # 7. one env var name and the repo helper
+    def test_only_hwc_verbatim_dir_is_read(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_VERBATIM_DIR", str(tmp_path / "old-name"))
+        monkeypatch.delenv("HWC_VERBATIM_DIR", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "h"))
+        assert _load().verbatim_dir() == tmp_path / "h" / "data" / "op" / "verbatim"
+        monkeypatch.setenv("HWC_VERBATIM_DIR", str(tmp_path / "new-name"))
+        assert _load().verbatim_dir() == tmp_path / "new-name"
+
+    def test_the_source_has_no_hard_coded_home_and_no_old_env_name(self):
+        src = (REPO / "plugins" / "verbatim-reply" / "__init__.py").read_text()
+        assert "HERMES_VERBATIM_DIR" not in src
+        assert "get_hermes_home" in src
+
+    # 8. the skill lock limit is documented
+    def test_docstring_documents_the_terminal_limit(self):
+        doc = _load().__doc__
+        assert "does NOT inspect `terminal` or `execute_code`" in doc
+
+
+# ---------------------------------------------------------------------------
+# Contract with the coach repo (verbatim.py)
+# ---------------------------------------------------------------------------
+
+COACH_SCRIPTS = Path(os.environ.get("HWC_COACH_SCRIPTS") or "/Users/0xsteamboat/projects/health-wellness-coach/skill/scripts")
+
+
+@pytest.mark.skipif(not (COACH_SCRIPTS / "verbatim.py").exists(), reason="coach repo not on this machine")
+def test_id_patterns_are_identical_in_both_repos():
+    src = (COACH_SCRIPTS / "verbatim.py").read_text()
+    coach_id = src.split('ID_RE = re.compile(r"^')[1].split('$")')[0]
+    assert coach_id == _load().ID_PATTERN
+
+
+@pytest.mark.skipif(not (COACH_SCRIPTS / "verbatim.py").exists(), reason="coach repo not on this machine")
+def test_real_coach_staging_round_trips_through_the_plugin(vr, tmp_path, monkeypatch):
+    """Real verbatim.stage output (JSON id form and marker form) is found and read back by the plugin."""
+    spec = importlib.util.spec_from_file_location("coach_verbatim_under_test", COACH_SCRIPTS / "verbatim.py")
+    cv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cv)
+    for _ in range(20):
+        vid = cv.stage("**Done**\nline")
+        assert vid and vr.ID_RE.match(vid)
+        as_json = json.dumps({"output": json.dumps({"ok": True, "message": "m", "verbatim_id": vid})})
+        as_marker = cv.wrap_text("**Done**\nline")
+        for res in (as_json, json.dumps({"output": as_marker})):
+            ids = vr.find_ids(res)
+            assert len(ids) == 1 and vr.read_staged(ids[0]) in ("**Done**\nline",)
+    # the marker form: first and last lines carry the same id
+    ids = vr.find_ids(cv.wrap_text("x y"))
+    assert len(ids) == 1
