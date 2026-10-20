@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -515,6 +516,72 @@ def _write_hotcore_blocks(path: str, blocks: List[str]) -> None:
     os.replace(tmp, path)
 
 
+HOTCORE_EVICT_LOG = os.path.expanduser("~/.hermes/state/hotcore_evictions.log")
+
+
+def _hotcore_size(blocks: List[str]) -> int:
+    """Bytes the file would occupy if written from these blocks through
+    _write_hotcore_blocks: bodies, the "\n§\n" separators, and the final newline."""
+    if not blocks:
+        return 0
+    return sum(len(b.encode("utf-8")) for b in blocks) + 4 * (len(blocks) - 1) + 1
+
+
+def _evict_to_budget(blocks: List[str], keep_last: int = 1) -> List[str]:
+    """Drop the oldest non-rule blocks until MEMORY.md fits HOTCORE_BUDGET_BYTES.
+
+    Chin, 2026-10-20, choosing this over raising the ceiling: "Cap the file and
+    drop the weakest entry. The dropped fact stays in the saved memory and is
+    found when relevant, so nothing is lost."
+
+    Order of sacrifice, weakest first:
+      1. never an [R] block -- rules are the one class the heartbeat asserts on
+         ("11 [R] rules, none lost"), so dropping one turns a size warning into a
+         real failure.
+      2. never the block just promoted (keep_last, counted from the end).
+      3. oldest first. Promotion appends, so file order is age order.
+
+    A dropped block is not deleted from the spine store: it was promoted FROM an
+    observation and stays there, retrievable by recall. Every eviction is
+    appended to HOTCORE_EVICT_LOG so a fact that later goes missing can be traced
+    to the pass that dropped it. If nothing is evictable the file stays over
+    budget and the caller reports it: losing a fact to satisfy a number is worse
+    than a loud warning.
+    """
+    if _hotcore_size(blocks) <= HOTCORE_BUDGET_BYTES:
+        return blocks
+    kept = list(blocks)
+    protected = max(len(blocks) - keep_last, 0)
+    dropped: List[str] = []
+    for block in blocks[:protected]:
+        if _hotcore_size(kept) <= HOTCORE_BUDGET_BYTES:
+            break
+        if block.lstrip().startswith("[R]"):
+            continue
+        try:
+            kept.remove(block)
+        except ValueError:
+            continue
+        dropped.append(block)
+    if dropped:
+        try:
+            os.makedirs(os.path.dirname(HOTCORE_EVICT_LOG), exist_ok=True)
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            with open(HOTCORE_EVICT_LOG, "a", encoding="utf-8") as f:
+                for b in dropped:
+                    f.write(f"{stamp}\t{len(b.encode('utf-8'))}B\t{b[:120].replace(chr(10), ' ')}\n")
+        except OSError:
+            logger.warning("Evicted %d block(s) from MEMORY.md but could not write the log", len(dropped))
+        logger.warning("Evicted %d block(s) from MEMORY.md to hold the %d-byte budget "
+                       "(now %d bytes); they stay retrievable from the spine store",
+                       len(dropped), HOTCORE_BUDGET_BYTES, _hotcore_size(kept))
+    if _hotcore_size(kept) > HOTCORE_BUDGET_BYTES:
+        logger.error("MEMORY.md is still %d bytes over the %d-byte budget after evicting "
+                     "%d block(s); nothing injective left to drop",
+                     _hotcore_size(kept), HOTCORE_BUDGET_BYTES, len(dropped))
+    return kept
+
+
 def _hotcore_entry(content: str, obs_type: str) -> str:
     return f"{_TAG_MAP.get(obs_type, '[F]')} {content}".strip()
 
@@ -729,7 +796,9 @@ def _promote_to_hotcore(obs_id: str, content: str, obs_type: str,
                 logger.debug("Skipped promoting %s — reword of an existing block",
                              obs_id)
                 return "duplicate"
-            _write_hotcore_blocks(mem_path, blocks + [entry])
+            # Chin, 2026-10-20: cap the always-loaded file. The weakest
+            # block goes and its fact stays in the spine store, retrievable.
+            _write_hotcore_blocks(mem_path, _evict_to_budget(blocks + [entry]))
         logger.info("Promoted %s to MEMORY.md: %s", obs_id, content[:80])
         return "written"
     except Exception as e:  # noqa: BLE001

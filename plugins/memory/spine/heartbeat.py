@@ -300,6 +300,13 @@ def check_consolidation(cfg):
     except (json.JSONDecodeError, OSError):
         return SKIP, "latest consolidation report unreadable"
     warns = rep.get("warnings") or []
+    # A stored "over budget" warning measures a PAST state, not a live one. It still said
+    # 42,028 bytes after the cap took the file to 35,942, so this check failed on history
+    # immediately after the thing it was complaining about had been fixed. A budget warning
+    # is only true while the file is actually over budget.
+    if os.path.exists(MEM_MD) and os.path.getsize(MEM_MD) <= HOTCORE_WARN_BYTES:
+        warns = [w for w in warns
+                 if not ("budget" in w.lower() and "over the" in w.lower())]
     if warns:
         return FAIL, "consolidation reported: " + "; ".join(warns)
     return OK, f"ran {age_h:.0f}h ago, no warnings"
