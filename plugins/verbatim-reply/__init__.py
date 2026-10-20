@@ -59,6 +59,7 @@ _MARKER_INLINE = re.compile(rf"[ \t]?\[verbatim {ID_PATTERN}\]")
 
 # Only these tools can carry a fresh id: they run the coach scripts. Other tools may echo an old one.
 ID_TOOLS = {"terminal", "process", "process_manage", "execute_code"}
+_FOOD_CARD = re.compile(r'\\*"card\\*":\s*\\*"food')
 
 MAX_TEXT_BYTES = 200_000
 MAX_FILE_AGE_S = 3600
@@ -187,6 +188,8 @@ def _on_transform_tool_result(
         # a tool question ("needs_question") the model answered itself later in the same turn is
         # superseded: only a question that is still the last scripted text reaches the chat
         is_question = "needs_question" in result
+        # a food card shows the whole sitting and the day, so only the last one of a turn is sent
+        is_food = bool(_FOOD_CARD.search(result))
         for vid in ids:
             with _LOCK:
                 _prune(now)
@@ -201,19 +204,23 @@ def _on_transform_tool_result(
                 logger.info("verbatim-reply: no staged text for id %s (tool %s)", vid, tool_name)
                 continue
             with _LOCK:
-                entry = _PENDING.setdefault(key, {"ts": now, "ids": [], "texts": [], "questions": []})
+                entry = _PENDING.setdefault(key, {"ts": now, "ids": [], "texts": [], "questions": [], "food": []})
                 entry["ids"].append(vid)   # the id is spent for this turn even when the text repeats
                 qs = entry.setdefault("questions", [False] * len(entry["texts"]))
-                kept = [(t, q) for t, q in zip(entry["texts"], qs) if not q]
+                fs = entry.setdefault("food", [False] * len(entry["texts"]))
+                kept = [(t, q, f) for t, q, f in zip(entry["texts"], qs, fs) if not q and not (f and is_food)]
                 if len(kept) < len(entry["texts"]):
-                    logger.info("verbatim-reply: dropped %d superseded question(s)", len(entry["texts"]) - len(kept))
-                entry["texts"] = [t for t, _q in kept]
+                    logger.info("verbatim-reply: dropped %d superseded question(s) or food card(s)",
+                                len(entry["texts"]) - len(kept))
+                entry["texts"] = [t for t, _q, _f in kept]
                 entry["questions"] = [False] * len(kept)
+                entry["food"] = [f for _t, _q, f in kept]
                 if text.strip() in [t.strip() for t in entry["texts"]]:
                     logger.info("verbatim-reply: id %s repeats a text already held for this turn, skipped", vid)
                     continue
                 entry["texts"].append(text)
                 entry["questions"].append(is_question)
+                entry["food"].append(is_food)
                 entry["ts"] = now
     except Exception as exc:
         logger.debug("verbatim-reply transform_tool_result failed (non-fatal): %s", exc)

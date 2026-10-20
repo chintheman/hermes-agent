@@ -503,6 +503,21 @@ class TestReviewFixes:
         self.tool(vr, json.dumps({"status": "needs_question", "verbatim_id": ID1}))
         assert self.out(vr, text="Was that the large or the regular latte?") == "Was that the large or the regular latte?"
 
+    def test_only_the_last_food_card_of_a_turn_is_sent(self, vr):
+        stage(vr, ID1, "card one")
+        stage(vr, ID2, "card two")
+        stage(vr, ID3, "card three, the whole sitting")
+        for vid in (ID1, ID2, ID3):
+            self.tool(vr, json.dumps({"output": json.dumps({"status": "ok", "card": "food", "verbatim_id": vid})}))
+        assert self.out(vr, text="Logged all three.") == "Logged all three.\n\ncard three, the whole sitting"
+
+    def test_a_food_card_does_not_drop_other_scripted_texts(self, vr):
+        stage(vr, ID1, "steps saved")
+        stage(vr, ID2, "food card")
+        self.tool(vr, json.dumps({"verbatim_id": ID1}))
+        self.tool(vr, json.dumps({"card": "food", "verbatim_id": ID2}))
+        assert self.out(vr) == "steps saved\n\nfood card"
+
     def test_different_texts_are_both_kept(self, vr):
         stage(vr, ID1, "one")
         stage(vr, ID2, "two")
