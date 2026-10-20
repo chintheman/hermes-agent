@@ -15,7 +15,8 @@ How it fits together (hook contracts are in hermes_cli/plugins.py VALID_HOOKS):
   already held for the turn is not added twice.
 * transform_llm_output: registered FIRST (register_hook(first=True)) so a scripted message wins over any other
   plugin that rewrites replies, whatever the load order. If the turn has staged texts, the model's final text is replaced by them, joined by a
-  blank line. The entry is looked up by (session_id, turn_id), then by turn_id alone when exactly one entry has
+  blank line. A tool question (needs_question) is dropped once a later scripted text arrives in the same turn:
+  the model answered it itself. The entry is looked up by (session_id, turn_id), then by turn_id alone when exactly one entry has
   it (context compression can change session_id mid-turn). Otherwise, on Telegram only, em and en dashes are
   scrubbed. `[verbatim <id>]` marker lines are stripped from every final text.
 * The core calls the hook with an empty reply too (agent/turn_finalizer.py, allow_empty), so a turn where the
@@ -182,6 +183,9 @@ def _on_transform_tool_result(
             return None
         key = (session_id or "", turn_id or "")
         now = time.time()
+        # a tool question ("needs_question") the model answered itself later in the same turn is
+        # superseded: only a question that is still the last scripted text reaches the chat
+        is_question = "needs_question" in result
         for vid in ids:
             with _LOCK:
                 _prune(now)
@@ -196,12 +200,19 @@ def _on_transform_tool_result(
                 logger.info("verbatim-reply: no staged text for id %s (tool %s)", vid, tool_name)
                 continue
             with _LOCK:
-                entry = _PENDING.setdefault(key, {"ts": now, "ids": [], "texts": []})
+                entry = _PENDING.setdefault(key, {"ts": now, "ids": [], "texts": [], "questions": []})
                 entry["ids"].append(vid)   # the id is spent for this turn even when the text repeats
+                qs = entry.setdefault("questions", [False] * len(entry["texts"]))
+                kept = [(t, q) for t, q in zip(entry["texts"], qs) if not q]
+                if len(kept) < len(entry["texts"]):
+                    logger.info("verbatim-reply: dropped %d superseded question(s)", len(entry["texts"]) - len(kept))
+                entry["texts"] = [t for t, _q in kept]
+                entry["questions"] = [False] * len(kept)
                 if text.strip() in [t.strip() for t in entry["texts"]]:
                     logger.info("verbatim-reply: id %s repeats a text already held for this turn, skipped", vid)
                     continue
                 entry["texts"].append(text)
+                entry["questions"].append(is_question)
                 entry["ts"] = now
     except Exception as exc:
         logger.debug("verbatim-reply transform_tool_result failed (non-fatal): %s", exc)

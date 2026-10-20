@@ -19,6 +19,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 ID1 = "20261019T104416Z970a163e"
 ID2 = "20261019T104417Zdeadbeef"
+ID3 = "20261019T104418Zfeedface"
 
 
 def _load():
@@ -465,6 +466,24 @@ class TestReviewFixes:
         self.tool(vr, f"[verbatim {ID2}]")
         assert vr._PENDING[("s1", "t1")]["texts"] == ["the card"]
         assert self.out(vr) == "the card"
+
+    def test_a_question_the_model_answered_later_in_the_turn_is_not_sent(self, vr):
+        q = "\u2754 **I need numbers for this dish**\nSend kcal and protein ranges."
+        stage(vr, ID1, q)
+        stage(vr, ID2, q.replace("dish", "drink"))
+        stage(vr, ID3, "the food card")
+        qres = lambda vid: json.dumps({"output": json.dumps({"status": "needs_question", "verbatim_id": vid})})
+        self.tool(vr, qres(ID1))
+        self.tool(vr, qres(ID2))
+        self.tool(vr, json.dumps({"output": json.dumps({"status": "ok", "verbatim_id": ID3})}))
+        assert self.out(vr) == "the food card"
+
+    def test_a_question_that_is_the_last_scripted_text_is_sent(self, vr):
+        stage(vr, ID1, "the food card")
+        stage(vr, ID2, "Which dish is this?")
+        self.tool(vr, json.dumps({"status": "ok", "verbatim_id": ID1}))
+        self.tool(vr, json.dumps({"status": "needs_question", "verbatim_id": ID2}))
+        assert self.out(vr) == "the food card\n\nWhich dish is this?"
 
     def test_different_texts_are_both_kept(self, vr):
         stage(vr, ID1, "one")
