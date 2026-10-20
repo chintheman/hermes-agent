@@ -148,14 +148,14 @@ class TestToolResult:
 # ---------------------------------------------------------------------------
 
 class TestLlmOutput:
-    def out(self, vr, text="model words", platform="telegram", session="s1", turn="t1"):
+    def out(self, vr, text="", platform="telegram", session="s1", turn="t1"):
         return _llm(vr, response_text=text, session_id=session, model="m", platform=platform, turn_id=turn)
 
     def test_scripted_text_replaces_the_model_text_joined_by_a_blank_line(self, vr, caplog):
         vr._PENDING[("s1", "t1")] = {"ts": time.time(), "ids": [ID1, ID2], "texts": ["one", "two"]}
         with caplog.at_level(logging.INFO):
             assert self.out(vr) == "one\n\ntwo"
-        assert "verbatim-reply: replaced model text with 2 scripted message(s)" in caplog.text
+        assert "verbatim-reply: reply is no model text and 2 scripted message(s)" in caplog.text
         assert ("s1", "t1") not in vr._PENDING
         assert self.out(vr) is None
 
@@ -424,7 +424,7 @@ def test_end_to_end_tool_result_to_final_reply(vr, monkeypatch):
     logger = logging.getLogger("test")
     model_words = "Here is your summary — nice work!"
     got = apply_llm_output_transform(agent, model_words, turn_id="turn-1", platform="telegram", logger=logger)
-    assert got == (card, True, model_words)
+    assert got == ("Here is your summary, nice work!\n\n" + card, True, model_words)
 
     # A turn with no scripted text on Telegram only gets the dash scrub.
     text, transformed, _ = apply_llm_output_transform(agent, "ok — done", turn_id="turn-2", platform="telegram", logger=logger)
@@ -444,7 +444,7 @@ def test_end_to_end_two_tool_calls_in_one_turn(vr, monkeypatch):
         model_tools._apply_transform_tool_result_hook("terminal", {}, reply, 1, ids)
     agent = SimpleNamespace(session_id="sess-1", model="m", platform="telegram")
     text, transformed, _ = apply_llm_output_transform(agent, "done", turn_id="turn-9", platform="telegram", logger=logging.getLogger("t"))
-    assert text == "Renamed Row to cable seated row.\n\nRenamed Curl to barbell curl." and transformed
+    assert text == "done\n\nRenamed Row to cable seated row.\n\nRenamed Curl to barbell curl." and transformed
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +455,7 @@ class TestReviewFixes:
     def tool(self, vr, result, name="terminal", session="s1", turn="t1"):
         return vr._on_transform_tool_result(tool_name=name, args={}, result=result, session_id=session, turn_id=turn)
 
-    def out(self, vr, text="model words", platform="telegram", session="s1", turn="t1"):
+    def out(self, vr, text="", platform="telegram", session="s1", turn="t1"):
         return _llm(vr, response_text=text, session_id=session, model="m", platform=platform, turn_id=turn)
 
     # 1. dedupe by text
@@ -484,6 +484,24 @@ class TestReviewFixes:
         self.tool(vr, json.dumps({"status": "ok", "verbatim_id": ID1}))
         self.tool(vr, json.dumps({"status": "needs_question", "verbatim_id": ID2}))
         assert self.out(vr) == "the food card\n\nWhich dish is this?"
+
+    # 20 Oct: the model's own words are kept (Chin asked a question and never saw the answer)
+    def test_the_model_answer_comes_first_and_the_card_is_attached(self, vr):
+        stage(vr, ID1, "\u26aa **Paris Baguette iced latte**\nkcal 165 to 205\nall jobs ran \u00b7 v1")
+        self.tool(vr, json.dumps({"status": "ok", "verbatim_id": ID1}))
+        got = self.out(vr, text="Found it on the Paris Baguette site \u2014 their latte, so I updated it.")
+        assert got == ("Found it on the Paris Baguette site, their latte, so I updated it.\n\n"
+                       "\u26aa **Paris Baguette iced latte**\nkcal 165 to 205\nall jobs ran \u00b7 v1")
+
+    def test_a_card_the_model_already_pasted_is_not_sent_twice(self, vr):
+        stage(vr, ID1, "**Card**\nline two")
+        self.tool(vr, json.dumps({"status": "ok", "verbatim_id": ID1}))
+        assert self.out(vr, text="Logged.\n\n**Card**\nline two") == "Logged.\n\n**Card**\nline two"
+
+    def test_a_tool_question_is_not_attached_when_the_model_wrote_its_own(self, vr):
+        stage(vr, ID1, "\u2754 **I need numbers for this dish**\nSend kcal and protein ranges.")
+        self.tool(vr, json.dumps({"status": "needs_question", "verbatim_id": ID1}))
+        assert self.out(vr, text="Was that the large or the regular latte?") == "Was that the large or the regular latte?"
 
     def test_different_texts_are_both_kept(self, vr):
         stage(vr, ID1, "one")
@@ -734,7 +752,7 @@ def test_scripted_text_beats_rewriting_plugins_in_any_load_order(vr, tmp_path, m
     vr._PENDING[("s1", "t1")] = {"ts": time.time(), "ids": [ID1], "texts": ["SCRIPTED CARD"]}
     results = mgr.invoke_hook("transform_llm_output", response_text="model words", session_id="s1",
                               model="m", platform="telegram", turn_id="t1")
-    assert next(r for r in results if isinstance(r, str)) == "SCRIPTED CARD"
+    assert next(r for r in results if isinstance(r, str)) == "model words\n\nSCRIPTED CARD"
 
 
 def test_negative_control_without_first_a_rival_loaded_earlier_wins(vr, tmp_path, monkeypatch):
@@ -775,10 +793,10 @@ def test_a_second_scripted_turn_is_also_delivered_and_the_first_is_not_replayed(
         "transform_llm_output", response_text="x", session_id="s1", model="m", platform="cli", turn_id=turn)
         if isinstance(r, str)), None)
     vr._PENDING[("s1", "t1")] = {"ts": time.time(), "ids": [ID1], "texts": ["ONE"]}
-    assert call("t1") == "ONE"
+    assert call("t1") == "x\n\nONE"
     assert call("t1").startswith("REWRITTEN")
     vr._PENDING[("s1", "t2")] = {"ts": time.time(), "ids": [ID2], "texts": ["TWO"]}
-    assert call("t2") == "TWO"
+    assert call("t2") == "x\n\nTWO"
 
 
 def test_first_registration_is_unloaded_cleanly(vr, tmp_path, monkeypatch):

@@ -15,8 +15,9 @@ How it fits together (hook contracts are in hermes_cli/plugins.py VALID_HOOKS):
   already held for the turn is not added twice.
 * transform_llm_output: registered FIRST (register_hook(first=True)) so a scripted message wins over any other
   plugin that rewrites replies, whatever the load order. If the turn has staged texts, the model's final text is replaced by them, joined by a
-  blank line. A tool question (needs_question) is dropped once a later scripted text arrives in the same turn:
-  the model answered it itself. The entry is looked up by (session_id, turn_id), then by turn_id alone when exactly one entry has
+  blank line. Since 20 Oct the model's own words are kept and come first; each scripted text it did not
+  already include is attached below them (compose_reply). Tool questions (needs_question) are attached only
+  when the model wrote nothing. The entry is looked up by (session_id, turn_id), then by turn_id alone when exactly one entry has
   it (context compression can change session_id mid-turn). Otherwise, on Telegram only, em and en dashes are
   scrubbed. `[verbatim <id>]` marker lines are stripped from every final text.
 * The core calls the hook with an empty reply too (agent/turn_finalizer.py, allow_empty), so a turn where the
@@ -277,6 +278,25 @@ def _take_entry(session_id: str, turn_id: str) -> Optional[dict]:
     return None
 
 
+def compose_reply(response_text: Any, entry: dict, platform: str = "") -> Optional[str]:
+    """The model's own words first, then each scripted text it did not already include.
+
+    The model answers what Chin said (a search, a question, a correction) in its own words; the scripted
+    card is attached word for word below them, never retyped. A tool question (needs_question) is attached
+    only when the model wrote nothing; otherwise the model asks in its own words."""
+    model = strip_markers(response_text).strip() if isinstance(response_text, str) else ""
+    qs = entry.get("questions") or [False] * len(entry["texts"])
+    cards = [t for t, q in zip(entry["texts"], qs) if not q] if model else list(entry["texts"])
+    seen = normalize(model)
+    cards = [t for t in cards if not (normalize(t) and normalize(t) in seen)]
+    if model and (platform or "").lower() == "telegram":
+        model = scrub_dashes(model)
+    parts = ([model] if model else []) + [strip_markers(t).strip() for t in cards]
+    logger.info("verbatim-reply: reply is %s model text and %d scripted message(s)",
+                "kept" if model else "no", len(cards))
+    return "\n\n".join(p for p in parts if p) or None
+
+
 def _on_transform_llm_output_first(
     response_text: str = "", session_id: str = "", model: str = "", platform: str = "",
     turn_id: str = "", **_: Any,
@@ -288,10 +308,9 @@ def _on_transform_llm_output_first(
     try:
         entry = _take_entry(session_id, turn_id)
         if entry and entry["texts"]:
-            logger.info("verbatim-reply: replaced model text with %d scripted message(s)", len(entry["texts"]))
             with _LOCK:
                 _remember_delivered(entry["ids"], time.time())
-            return strip_markers("\n\n".join(entry["texts"])) or None
+            return compose_reply(response_text, entry, platform)
         if isinstance(response_text, str) and response_text:
             stripped = strip_markers(response_text)
             if stripped != response_text and stripped.strip():
