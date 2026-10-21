@@ -76,6 +76,17 @@ def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
     return None
 
 
+def _promise_stop_nudge(agent, final_response) -> Optional[str]:
+    """A reply that ends promising later work ("I'll check next and tell you") gets one redo."""
+    try:
+        from agent.promise_stop import build_promise_stop_nudge
+
+        return build_promise_stop_nudge(final_response, attempts=getattr(agent, "_promise_stop_nudges", 0))
+    except Exception:
+        logger.debug("promise check failed", exc_info=True)
+        return None
+
+
 def _kanban_stop_nudge(agent, messages) -> Optional[str]:
     """Workers must end with a terminal board tool (kanban_complete / kanban_block /
     kanban_request_review / kanban_request_changes); a narrated stop is recorded
@@ -107,7 +118,7 @@ def apply_stop_gates(
     conversation_history: Any, pending_verification_response: Any,
     pending_verification_response_previewed: Any,
 ) -> StopGateVerdict:
-    """Run verify-on-stop → pre_verify hook → kanban stop guard, in that order. Nudges
+    """Run verify-on-stop → pre_verify hook → promise check → kanban stop guard, in that order. Nudges
     are user-role rows appended only after the assistant answer row, so role alternation
     holds. Hook lookups are imported lazily from their origin modules (tests patch them
     there)."""
@@ -151,6 +162,17 @@ def apply_stop_gates(
         )
         verdict = _continue(_verify_nudge2, "_pre_verify_synthetic")
         logger.debug("pre_verify nudge issued (attempt %d)", agent._pre_verify_nudges)
+        return verdict
+
+    _promise_nudge = _promise_stop_nudge(agent, final_response)
+    if _promise_nudge:
+        agent._promise_stop_nudges = getattr(agent, "_promise_stop_nudges", 0) + 1
+        final_msg["finish_reason"] = "promise_check"
+        # The draft promised work after the turn: never shown, never stored; the redo replaces it.
+        final_msg["_promise_stop_synthetic"] = True
+        append_message(messages, final_msg)
+        verdict = _continue(_promise_nudge, "_promise_stop_synthetic")
+        logger.info("promise check nudge issued: %.120s", _promise_nudge)
         return verdict
 
     _kanban_nudge = _kanban_stop_nudge(agent, messages)
