@@ -1275,8 +1275,22 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             return default
         return bool(value)
 
-    def _link_preview_kwargs(self) -> dict[str, Any]:
-        if not getattr(self, "_disable_link_previews", False):
+    def _previews_off(self, chat_id: Any = None, thread_id: Any = None) -> bool:
+        """Global ``disable_link_previews``, or this chat/topic pair in ``disable_link_previews_topics``
+        (``<chat_id>:<thread_id>`` entries, like ``free_response_topics``): a topic whose cards carry
+        demo links keeps its messages free of a preview under every card."""
+        if getattr(self, "_disable_link_previews", False):
+            return True
+        if chat_id is None or thread_id is None:
+            return False
+        try:
+            topics = self._extra_str_set("disable_link_previews_topics", "TELEGRAM_DISABLE_LINK_PREVIEWS_TOPICS")
+        except Exception:
+            return False
+        return f"{str(chat_id).strip()}:{str(thread_id).strip()}" in topics
+
+    def _link_preview_kwargs(self, chat_id: Any = None, thread_id: Any = None) -> dict[str, Any]:
+        if not self._previews_off(chat_id, thread_id):
             return {}
         if LinkPreviewOptions is not None:
             return {"link_preview_options": LinkPreviewOptions(is_disabled=True)}
@@ -1487,7 +1501,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         if routing is None:
             return None
         reply_to_id, thread_kwargs = routing
-        payload = self._rich_payload_base(chat_id, content)
+        payload = self._rich_payload_base(chat_id, content, thread_id)
         # Only non-None routing keys: direct_messages_topic_id is paired with message_thread_id=None.
         payload.update({k: v for k, v in thread_kwargs.items() if v is not None})
         payload.update(self._notification_kwargs(metadata))
@@ -1520,9 +1534,9 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             await self._record_rich_sent(chat_id, message_id, content)
         return SendResult(success=True, message_id=str(message_id) if message_id is not None else None)
 
-    def _rich_payload_base(self, chat_id: str, content: str) -> dict[str, Any]:
+    def _rich_payload_base(self, chat_id: str, content: str, thread_id: Any = None) -> dict[str, Any]:
         payload: dict[str, Any] = {"chat_id": normalize_telegram_chat_id(chat_id), "rich_message": self._rich_message_payload(content)}
-        if getattr(self, "_disable_link_previews", False):
+        if self._previews_off(chat_id, thread_id):
             payload["link_preview_options"] = {"is_disabled": True}
         return payload
 
@@ -1541,7 +1555,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         """Edit a message in place as rich (``editMessageText`` + ``rich_message``) so a streamed preview
         finalizes without send+delete. Same contract as :meth:`_try_send_rich`."""
         # No topic routing on edits: message_thread_id/direct_messages_topic_id make Telegram reject it.
-        payload = {**self._rich_payload_base(chat_id, content), "message_id": int(message_id)}
+        payload = {**self._rich_payload_base(chat_id, content, self._metadata_thread_id(metadata)), "message_id": int(message_id)}
         try:
             await _await_with_thread_deadline(
                 self._bot.do_api_request("editMessageText", api_kwargs=payload),
@@ -3516,7 +3530,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             try:
                 send_kwargs = {
                     "chat_id": normalize_telegram_chat_id(chat_id), "reply_to_message_id": reply_to_id, **thread_kwargs,
-                    **self._link_preview_kwargs(), **self._notification_kwargs(metadata)}
+                    **self._link_preview_kwargs(chat_id, thread_id), **self._notification_kwargs(metadata)}
                 return await self._send_chunk_markdown_or_plain(chunk, send_kwargs), used_thread_fallback
             except _NetErr as send_err:
                 # BadRequest subclasses NetworkError in PTB but is permanent; handle specific cases.
@@ -4110,7 +4124,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         thread_id: Optional[str], metadata: Optional[dict[str, Any]], finalize: bool):
         """Send one continuation chunk (MarkdownV2 then plain on finalize; raw when streaming); drops the
         reply anchor once on 'reply message not found'. Returns the sent message or None."""
-        base = {**self._link_preview_kwargs(), **self._notification_kwargs(metadata)}
+        base = {**self._link_preview_kwargs(chat_id, thread_id), **self._notification_kwargs(metadata)}
         for use_markdown in (True, False) if finalize else (False,):
             try:
                 if use_markdown:
@@ -4292,7 +4306,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         """Send a control-style message (prompt/picker) with topic routing + thread fallback."""
         reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=reply_to_mode)
         kwargs: dict[str, Any] = {
-            "chat_id": normalize_telegram_chat_id(chat_id), "text": text, "parse_mode": parse_mode, **self._link_preview_kwargs()}
+            "chat_id": normalize_telegram_chat_id(chat_id), "text": text, "parse_mode": parse_mode, **self._link_preview_kwargs(chat_id, thread_id)}
         if reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
         kwargs["reply_to_message_id"] = reply_to_id
@@ -7407,7 +7421,8 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
     if not token:
         from agent.secret_scope import get_secret  # profile-scoped: never borrow another profile's token
         token = get_secret("TELEGRAM_BOT_TOKEN", "") or ""
-    disable_link_previews = bool(getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews"))
+    from tools.send_message_senders import telegram_previews_off
+    disable_link_previews = telegram_previews_off(getattr(pconfig, "extra", None), chat_id, thread_id)
     from tools.send_message_tool import _send_telegram
     return await _send_telegram(
         token, chat_id, message, media_files=media_files, thread_id=thread_id,
@@ -7482,7 +7497,7 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
     _bridge_gate(
         "group_allowed_chats", "TELEGRAM_GROUP_ALLOWED_CHATS",
         telegram_cfg.get("group_allowed_chats") or _telegram_extra.get("group_allowed_chats"))
-    for _key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages", "free_response_topics"):
+    for _key in ("guest_mode", "disable_link_previews", "disable_link_previews_topics", "observe_unmentioned_group_messages", "free_response_topics"):
         if _key in telegram_cfg:
             extras.setdefault(_key, telegram_cfg[_key])
     # Pass through telegram-specific extra keys but EXCLUDE generic shared-config keys: _merge_platform_map

@@ -256,6 +256,17 @@ def _telegram_format(message):
         return message, ParseMode.MARKDOWN_V2, False  # formatting unavailable: send as-is
 
 
+def telegram_previews_off(extra, chat_id, thread_id=None) -> bool:
+    """``disable_link_previews``, or ``<chat_id>:<thread_id>`` in ``disable_link_previews_topics`` (list or comma string)."""
+    extra = extra or {}
+    if extra.get("disable_link_previews"):
+        return True
+    topics = extra.get("disable_link_previews_topics") or []
+    if isinstance(topics, str):
+        topics = topics.split(",")
+    return thread_id is not None and f"{str(chat_id).strip()}:{str(thread_id).strip()}" in {str(t).strip() for t in topics}
+
+
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
     """One-shot Telegram Bot API send; parse failures fall back to plain text."""
     try:
