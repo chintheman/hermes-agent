@@ -41,12 +41,12 @@ class TestRichMessageNewlineNormalization:
         assert "Line 1  \nLine 2  \nLine 3" == md
 
     def test_paragraph_breaks_preserved(self, adapter):
-        """Double newlines (paragraph breaks) must NOT gain extra spaces."""
+        """A paragraph break stays visible: Telegram's rich renderer drops the gap, so it is held open
+        with a no-break-space line (Chin, 2026-10-22; see test_rich_blank_lines.py)."""
         content = "Paragraph 1\n\nParagraph 2"
         payload = adapter._rich_message_payload(content)
         md = payload["markdown"]
-        # \n\n should remain as-is — no trailing spaces injected
-        assert "Paragraph 1\n\nParagraph 2" == md
+        assert "Paragraph 1  \n   \nParagraph 2" == md
 
 
 

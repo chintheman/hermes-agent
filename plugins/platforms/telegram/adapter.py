@@ -413,18 +413,35 @@ _RICH_PROTECTED_REGION_RE = re.compile(
     re.MULTILINE)
 
 
+_RICH_BLOCK_LINE_RE = re.compile(r'^\s*(?:[-*+] |\d+[.)] |>|#|<|\||```)|>\s*$')
+
+
+def _rich_keep_blank_lines(seg: str) -> str:
+    """Telegram's rich renderer shows a paragraph break between two plain lines with no gap, so the
+    blank line a message was written with disappears (Chin, 2026-10-22). Hold it open with a
+    no-break-space line, which the soft-break pass below turns into a visible empty line. A blank
+    line next to a list, quote, heading, tag, table or fence is left alone: it ends that block."""
+    lines = seg.split('\n')
+    for i in range(1, len(lines) - 1):
+        prev, nxt = lines[i - 1], lines[i + 1]
+        if (lines[i] == '' and prev.strip() and nxt.strip()
+                and not _RICH_BLOCK_LINE_RE.search(prev) and not _RICH_BLOCK_LINE_RE.search(nxt)):
+            lines[i] = '\u00a0'
+    return '\n'.join(lines)
+
+
 def _rich_normalize_linebreaks(text: str) -> str:
-    """Convert lone ``\\n`` (a Markdown soft break) to hard breaks for sendRichMessage; ``\\n\\n``,
-    fenced code and pipe tables are left untouched."""
+    """Convert lone ``\\n`` (a Markdown soft break) to hard breaks for sendRichMessage and keep a blank
+    line between plain lines visible; fenced code and pipe tables are left untouched."""
     if not text or '\n' not in text:
         return text
     out: list[str] = []
     pos = 0
     for m in _RICH_PROTECTED_REGION_RE.finditer(text):
-        out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', text[pos:m.start()]))
+        out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', _rich_keep_blank_lines(text[pos:m.start()])))
         out.append(m.group(0))  # protected region kept verbatim
         pos = m.end()
-    out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', text[pos:]))
+    out.append(re.sub(r'(?<!\n)\n(?!\n)', '  \n', _rich_keep_blank_lines(text[pos:])))
     return ''.join(out)
 
 
