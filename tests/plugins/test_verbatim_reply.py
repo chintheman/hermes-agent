@@ -498,6 +498,12 @@ class TestReviewFixes:
         self.tool(vr, json.dumps({"status": "ok", "verbatim_id": ID1}))
         assert self.out(vr, text="Logged.\n\n**Card**\nline two") == "Logged.\n\n**Card**\nline two"
 
+    def test_a_card_pasted_without_its_footer_is_not_sent_twice(self, vr):
+        stage(vr, ID1, "**Done \u00b7 Thu 22 Oct**\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nall jobs ran \u00b7 vb15b53b")
+        self.tool(vr, json.dumps({"status": "ok", "verbatim_id": ID1}))
+        text = "**Done \u00b7 Thu 22 Oct**\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nFood: 4 meals."
+        assert self.out(vr, text=text) == text
+
     def test_a_tool_question_is_not_attached_when_the_model_wrote_its_own(self, vr):
         stage(vr, ID1, "\u2754 **I need numbers for this dish**\nSend kcal and protein ranges.")
         self.tool(vr, json.dumps({"status": "needs_question", "verbatim_id": ID1}))

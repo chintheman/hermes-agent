@@ -285,6 +285,15 @@ def _take_entry(session_id: str, turn_id: str) -> Optional[dict]:
     return None
 
 
+# The footer line every coach message ends with ("all jobs ran · v<sha>"). A card the model pasted without
+# its footer still counts as pasted (22 Oct: the session card reached Chin twice in one summary).
+_FOOTER_LINE = re.compile(r"\n+[^\n]*\bv[0-9a-f]{7,40}[ \t]*$")
+
+
+def _body(text: str) -> str:
+    return _FOOTER_LINE.sub("", strip_markers(text).strip())
+
+
 def compose_reply(response_text: Any, entry: dict, platform: str = "") -> Optional[str]:
     """The model's own words first, then each scripted text it did not already include.
 
@@ -295,7 +304,7 @@ def compose_reply(response_text: Any, entry: dict, platform: str = "") -> Option
     qs = entry.get("questions") or [False] * len(entry["texts"])
     cards = [t for t, q in zip(entry["texts"], qs) if not q] if model else list(entry["texts"])
     seen = normalize(model)
-    cards = [t for t in cards if not (normalize(t) and normalize(t) in seen)]
+    cards = [t for t in cards if not (normalize(_body(t)) and normalize(_body(t)) in seen)]
     if model and (platform or "").lower() == "telegram":
         model = scrub_dashes(model)
     parts = ([model] if model else []) + [strip_markers(t).strip() for t in cards]
