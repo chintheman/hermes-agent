@@ -15,11 +15,12 @@ from agent.context_compressor import (
     ContextCompressor,
     _PRUNED_TOOL_PLACEHOLDER,
     _estimate_msg_budget_tokens,
-    _LEAN_TAIL_DEMOTE_MIN_CHARS,
     _PRUNE_MIN_CHARS,
-    _lean_recovery_stub,
     salvage_grown_transcript,
 )
+# The lean-tail demotion moved to its own sibling (agent/context_compressor_tail.py) upstream;
+# internal paths are not API, so the test follows the move instead of a re-export shim.
+from agent.context_compressor_tail import _LEAN_TAIL_DEMOTE_MIN_CHARS, _lean_recovery_stub
 
 LARGE_WINDOW = 1_000_000
 
