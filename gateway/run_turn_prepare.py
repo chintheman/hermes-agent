@@ -39,6 +39,40 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 logger = logging.getLogger("gateway.run")
 
 
+_BOUND_SKILL_VERSIONS_KEEP = 500
+
+
+def _skill_fingerprint(loaded_skill: dict) -> str:
+    import hashlib
+    return hashlib.sha256(str(loaded_skill.get("content") or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _bound_skill_versions_path() -> Path:
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "state" / "bound_skill_versions.json"
+
+
+def _bound_skill_versions_read() -> dict:
+    """``{session_id: {skill: fingerprint}}`` of what each session last loaded. Unreadable reads as
+    empty, so an ongoing session reloads its skills once rather than never."""
+    try:
+        data = json.loads(_bound_skill_versions_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _bound_skill_versions_write(session_id: str, versions: dict) -> None:
+    from utils import atomic_write_text
+    data = _bound_skill_versions_read()
+    data.pop(session_id, None)
+    data[session_id] = versions  # newest last; oldest sessions drop off the front
+    data = dict(list(data.items())[-_BOUND_SKILL_VERSIONS_KEEP:])
+    path = _bound_skill_versions_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(data, indent=0))
+
+
 def _resolve_policy_agent_runtime(runner, policy, *, fallback=True) -> tuple[str, dict]:
     """``_resolve_session_agent_runtime`` for a session bound to a launch policy: the route's FROZEN
     config and launch credential, walking its own fallback chain on an AuthError unless
@@ -477,31 +511,42 @@ class GatewayTurnPrepareMixin:
         # was_auto_reset was consumed in _hmwa_open_session; only the reason needs clearing.
         session_entry.auto_reset_reason = None
 
-    def _hmwa_auto_load_skills(self, event, _auto, _quick_key, session_key):
-        """Prepend topic/channel-bound skill payload(s) to ``event.text`` on a new session."""
+    def _hmwa_auto_load_skills(self, event, _auto, _quick_key, session_key, session_id=None, only_changed=False):
+        """Prepend topic/channel-bound skill payload(s) to ``event.text``. A new session loads every
+        bound skill; an ongoing one (``only_changed``) reloads only a skill whose content differs from
+        what this session last loaded, so a SKILL.md edit reaches a long-running chat (Chin, 2026-10-22:
+        topic 5 ran on its 20 Oct rules for two days)."""
         _skill_names = [_auto] if isinstance(_auto, str) else list(_auto)
         try:
             from agent.skill_commands import _load_skill_payload, _build_skill_message
+            _seen = _bound_skill_versions_read().get(session_id or "", {})
             _combined_parts: list[str] = []
             _loaded_names: list[str] = []
+            _versions: dict[str, str] = {}
             for _sname in _skill_names:
                 _loaded = _load_skill_payload(_sname, task_id=_quick_key)
                 if not _loaded:
                     logger.warning("[Gateway] Auto-skill '%s' not found", _sname)
                     continue
                 _loaded_skill, _skill_dir, _display_name = _loaded
-                _part = _build_skill_message(
-                    _loaded_skill, _skill_dir,
-                    f'[IMPORTANT: The "{_display_name}" skill is auto-loaded. '
-                    f"Follow its instructions for this session.]",
-                )
+                _versions[_sname] = _skill_fingerprint(_loaded_skill)
+                if only_changed and _seen.get(_sname) == _versions[_sname]:
+                    continue
+                _note = (f'[IMPORTANT: The "{_display_name}" skill was updated since this chat started. '
+                         f"This version replaces the earlier one; follow it from now on.]") if only_changed else (
+                         f'[IMPORTANT: The "{_display_name}" skill is auto-loaded. '
+                         f"Follow its instructions for this session.]")
+                _part = _build_skill_message(_loaded_skill, _skill_dir, _note)
                 if _part:
                     _combined_parts.append(_part)
                     _loaded_names.append(_sname)
             if _combined_parts:
                 _combined_parts.append(event.text)  # user's original text after the payloads
                 event.text = "\n\n".join(_combined_parts)
-                logger.info("[Gateway] Auto-loaded skill(s) %s for session %s", _loaded_names, session_key)
+                logger.info("[Gateway] %s skill(s) %s for session %s",
+                            "Reloaded changed" if only_changed else "Auto-loaded", _loaded_names, session_key)
+            if session_id and _versions and _versions != _seen:
+                _bound_skill_versions_write(session_id, _versions)
         except Exception as e:
             logger.warning("[Gateway] Failed to auto-load skill(s) %s: %s", _skill_names, e)
 
@@ -674,10 +719,12 @@ class GatewayTurnPrepareMixin:
         # With no text (e.g. voice-only), retain the existing enriched-message title fallback.
         title_user_message = event.text or None
 
-        # Auto-load bound skill(s) only on NEW sessions; ongoing ones carry the content in history.
+        # Bound skill(s): a NEW session loads them; an ongoing one carries them in history and reloads
+        # only a skill whose file changed since this session last loaded it.
         _auto = getattr(event, "auto_skill", None)
-        if _is_new_session and _auto:
-            self._hmwa_auto_load_skills(event, _auto, _quick_key, session_key)
+        if _auto:
+            self._hmwa_auto_load_skills(event, _auto, _quick_key, session_key,
+                                        session_id=session_entry.session_id, only_changed=not _is_new_session)
 
         await self._hmwa_acquire_turn_lease(_quick_key, run_generation, session_entry, _session_env_tokens)
 
