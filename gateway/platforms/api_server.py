@@ -695,6 +695,89 @@ def check_api_server_requirements() -> bool:
 
 
 
+# --- access log (restored 2026-10-22 from d48d59e8fb) -------------------------
+# The v0.22.4 merge kept the `access_log_middleware` entry in the middleware list
+# but dropped this whole feature: five constants and four functions. The API
+# server therefore raised `name 'access_log_middleware' is not defined` on every
+# start and never bound port 8642. Restored verbatim from the pre-merge commit so
+# the fork's richer logging (scrubbed fields, rotation) is back rather than a stub.
+_ACCESS_LOG_PATH = os.path.expanduser("~/.hermes/logs/access.jsonl")
+_ACCESS_LOG_MAX_BYTES = 50 * 1024 * 1024
+_ACCESS_LOG_BACKUP = _ACCESS_LOG_PATH + ".1"
+_ACCESS_FIELD_MAX = 512
+
+_CRED_SHAPE_PATTERNS = (
+    re.compile(
+        r"(?i)(sk|pk|rk|ak|api[-_]?key|token|secret|password|passwd|bearer|"
+        r"client[-_]?secret)[-=_.:]\s*[A-Za-z0-9_\-\.=+/]{8,}"
+    ),
+    re.compile(r"\b[0-9a-fA-F]{32,}\b"),
+    re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"),
+)
+
+
+def _scrub_api_field(value: str) -> str:
+    value = value[:_ACCESS_FIELD_MAX]
+    for pat in _CRED_SHAPE_PATTERNS:
+        value = pat.sub("<redacted>", value)
+    return value
+
+
+def _rotate_api_access_log_if_needed() -> None:
+    try:
+        if os.path.getsize(_ACCESS_LOG_PATH) > _ACCESS_LOG_MAX_BYTES:
+            os.replace(_ACCESS_LOG_PATH, _ACCESS_LOG_BACKUP)
+    except OSError:
+        pass
+
+
+def _api_access_log_line(request, status: int, t0: float, unhandled: bool = False) -> None:
+    """Append one JSONL access entry. Never raises — logging must not break serving."""
+    from urllib.parse import urlparse
+
+    try:
+        # Referer is a secondary token-leak channel: strip query + fragment.
+        ref = urlparse(request.headers.get("Referer", "")).path
+        entry = {
+            "origin": "hermes-api",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "dur_ms": round((time.time() - t0) * 1000, 1),
+            "ip": request.remote or "",
+            "host": _scrub_api_field(request.host or ""),
+            "method": request.method,
+            "path": _scrub_api_field(request.path),
+            "status": status,
+            "ua": _scrub_api_field(request.headers.get("User-Agent", "")),
+            "ref": _scrub_api_field(ref),
+        }
+        if unhandled:
+            entry["unhandled_exception"] = True
+        _rotate_api_access_log_if_needed()
+        with open(_ACCESS_LOG_PATH, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+if AIOHTTP_AVAILABLE:
+    @web.middleware
+    async def access_log_middleware(request, handler):
+        """Outermost middleware: log method/path/IP/UA/status for every request."""
+        t0 = time.time()
+        unhandled = False
+        status = 500
+        try:
+            response = await handler(request)
+            status = response.status
+            return response
+        except Exception:
+            unhandled = True
+            status = 500  # aiohttp converts unhandled middleware exceptions to 500
+            raise
+        finally:
+            _api_access_log_line(request, status, t0, unhandled)
+
+
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id"}
