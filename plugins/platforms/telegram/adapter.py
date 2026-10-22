@@ -1747,12 +1747,31 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         # First proof getUpdates is flowing for this generation: flip a
         # published "retrying" (degraded connect, reconnect stamp, or the
         # mid-session recovery below) back to "connected" (#101391).
+        was_degraded = self._send_path_degraded
         if self._send_path_degraded and getattr(self, "_running", False) and not self.has_fatal_error:
             self._write_runtime_status_safe(
                 "connected", platform_state="connected", error_code=None, error_message=None,
             )
         self._send_path_degraded = False
+        if was_degraded:
+            self._redeliver_after_polling_recovery()
         return True
+
+    def _redeliver_after_polling_recovery(self) -> None:
+        """Resend what was refused while the send path was down. An in-place polling restart keeps
+        this adapter, so the runner's reconnect sweep never ran: the 22 Oct 09:12 workout card waited
+        for the 12:56 restart (Chin, 2026-10-22). Claiming is atomic, so a second sweep is harmless."""
+        runner = getattr(self, "gateway_runner", None)
+        redeliver = getattr(runner, "_redeliver_failed_obligations_for_platform", None)
+        if not callable(redeliver) or self._teardown_started or self.has_fatal_error:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(redeliver(self.platform, profile=getattr(self, "_owner_profile", None)))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _observe_polling_request_result(self, request, generation, result):
         """Record getUpdates progress from an observed do_request result (purely observational: PTB still
