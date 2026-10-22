@@ -823,3 +823,121 @@ def test_remember_dedupe_reindexes_a_row_missing_from_the_db(monkeypatch):
     con.close()
     assert row is not None, "dedupe confirmed a row that no longer exists"
     assert row[0] == text and row[1] == 2
+
+
+# ── hot-core cap ──────────────────────────────────────────────────────
+
+def _spine_db(path, rows):
+    """Real column names: status matters to the guard."""
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE IF NOT EXISTS observations "
+                "(id TEXT, profile TEXT, status TEXT, content TEXT)")
+    con.executemany("INSERT INTO observations VALUES (?, 'agent:main', ?, ?)",
+                    [(str(i), st, c) for i, (st, c) in enumerate(rows)])
+    con.commit()
+    return con
+
+
+@pytest.fixture
+def evict_log(tmp_path, monkeypatch):
+    log = tmp_path / "evictions.log"
+    monkeypatch.setattr(loops, "HOTCORE_EVICT_LOG", str(log))
+    return log
+
+
+def test_cap_keeps_blocks_spine_does_not_hold_verbatim(tmp_path, monkeypatch, evict_log):
+    """memory() writes bypass spine; on 2026-10-23 six blocks existed nowhere
+    else. Token overlap is not enough: the old guard passed 11 live blocks no
+    row held. An archived copy is not enough either: recall never sees it."""
+    monkeypatch.setattr(loops, "HOTCORE_BUDGET_BYTES", 40)
+    orphan = "[W] Quokkaville ferry timetable lives in zebrafolder"
+    scattered = "[F] Marmalade invoices Tuesday"
+    archived = "[F] Pelican report goes weekly"
+    saved = "[F] Heron ledger closes every Friday at noon"
+    con = _spine_db(str(tmp_path / "m.db"), [
+        ("active", "Marmalade invoices arrive"), ("active", "on Tuesday mornings"),
+        ("archived", "Pelican report goes weekly"),
+        ("active", "Quokkaville ferry timetable lives in zebrafolder"),
+        ("promoted", "Heron ledger closes every Friday at noon"),
+    ])
+    report = {}
+    kept = loops._evict_to_budget([orphan, scattered, archived, saved], con,
+                                  keep_last=0, report=report)
+    assert orphan in kept and scattered in kept and archived in kept
+    assert saved not in kept
+    assert report == {"evicted": 1, "held": 3}
+    logged = json.loads(evict_log.read_text().splitlines()[0])
+    assert logged["block"] == saved, "log must keep the full text"
+
+
+def test_cap_without_a_connection_drops_nothing(evict_log, monkeypatch):
+    monkeypatch.setattr(loops, "HOTCORE_BUDGET_BYTES", 10)
+    blocks = ["[F] one fact here", "[F] another fact here"]
+    assert loops._evict_to_budget(blocks, None, keep_last=0) == blocks
+    assert not evict_log.exists()
+
+
+def test_promote_does_not_evict_an_orphan_to_make_room(tmp_path, monkeypatch, evict_log):
+    """The promote path caps too, and must apply the same guard."""
+    from spine import loops as L
+    monkeypatch.setattr(L, "_hotcore_semantic_duplicate", lambda body, bodies: None)
+    f = tmp_path / "MEMORY.md"
+    orphan = "[W] Quokkaville ferry timetable lives in zebrafolder"
+    _hotcore(str(f), orphan + "\n")
+    monkeypatch.setattr(L, "HOTCORE_BUDGET_BYTES", 60)
+    con = _spine_db(str(tmp_path / "m.db"), [])
+    assert L._promote_to_hotcore("o1", "Heron ledger closes Friday", "fact",
+                                 None, con) == "written"
+    assert orphan in f.read_text()
+
+
+def _run_cap(tmp_path, monkeypatch, held_rows):
+    from spine.config import SpineConfig
+    from spine.index import MemoryIndex
+    cfg = SpineConfig(canonical_root=str(tmp_path), db=str(tmp_path / "m.db"))
+    f = tmp_path / "MEMORY.md"
+    blocks = [f"[F] block number {i:02d} " + "x" * 40 for i in range(20)]
+    _hotcore(str(f), "\n§\n".join(blocks) + "\n")
+    idx = MemoryIndex(cfg.db)
+    idx.open()
+    idx.conn.executemany(
+        "INSERT INTO observations (id, profile, status, content, type, created_at) "
+        "VALUES (?, 'agent:other', 'promoted', ?, 'fact', '2026-10-23T00:00:00+00:00')",
+        [(f"r{i}", loops._block_body(blocks[i])) for i in held_rows])
+    idx.conn.commit()
+    idx.close()
+    budget = f.stat().st_size - 100
+    monkeypatch.setattr(loops, "HOTCORE_BUDGET_BYTES", budget)
+    monkeypatch.setattr(loops, "HOTCORE_TARGET_BYTES", budget // 2)
+    return f, blocks, budget, loops.run_consolidation(cfg)
+
+
+def test_nightly_consolidation_caps_a_file_memory_grew(tmp_path, monkeypatch, evict_log):
+    """The cap lived only in _promote_to_hotcore, so memory() appends grew the
+    file past budget with nothing to trim it (38,596 bytes on 2026-10-22)."""
+    f, blocks, budget, report = _run_cap(tmp_path, monkeypatch, range(1, 20))
+    assert f.stat().st_size <= budget, report
+    assert blocks[0] in f.read_text(), "evicted the block that exists only here"
+    assert report["passes"]["cap"].startswith("evicted 2 block(s), skipped 1"), report
+    assert list(tmp_path.glob("MEMORY.md.bak.cap.*")), "no backup before the rewrite"
+    assert _round_trips(f.read_text())
+
+
+def test_nightly_cap_with_nothing_evictable_deletes_nothing_and_warns(
+        tmp_path, monkeypatch, evict_log):
+    f, blocks, budget, report = _run_cap(tmp_path, monkeypatch, [])
+    assert f.read_text() == "\n§\n".join(blocks) + "\n"
+    assert any("spine does not hold them verbatim" in w
+               for w in report.get("warnings", [])), report
+
+
+def test_nightly_consolidation_under_budget_still_returns_a_report(
+        tmp_path, monkeypatch, evict_log):
+    """demote_end was set only on the over-budget path; an under-budget night
+    raised UnboundLocalError after promote and before the DB commit."""
+    from spine.config import SpineConfig
+    cfg = SpineConfig(canonical_root=str(tmp_path), db=str(tmp_path / "m.db"))
+    f = tmp_path / "MEMORY.md"
+    _hotcore(str(f), "[F] small file\n§\n[F] still small\n")
+    report = loops.run_consolidation(cfg)
+    assert "demote" in report["passes"] and "cap" not in report["passes"], report

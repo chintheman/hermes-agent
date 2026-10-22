@@ -13,6 +13,7 @@ import logging
 import os
 import time
 import re
+import shutil
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -265,7 +266,7 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
         # excise text never written) and announced promotions that never
         # happened. A duplicate still marks promoted: the text IS in the hot
         # core, so the row is represented there and must become demotable.
-        outcome = _promote_to_hotcore(obs_id, content, obs_type, config)
+        outcome = _promote_to_hotcore(obs_id, content, obs_type, config, idx.conn)
         if outcome == "failed":
             continue
         if outcome == "duplicate":
@@ -294,7 +295,7 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
 
     for row in correction_candidates:
         obs_id, content, obs_type, epistemic, confidence = row
-        outcome = _promote_to_hotcore(obs_id, content, obs_type, config)
+        outcome = _promote_to_hotcore(obs_id, content, obs_type, config, idx.conn)
         if outcome == "failed":
             continue
         if outcome == "duplicate":
@@ -329,6 +330,7 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
     mem_path = _hotcore_path()
     mem_size = os.path.getsize(mem_path) if os.path.exists(mem_path) else 0
     start_size = mem_size
+    demote_end = mem_size
 
     rewrite_failed = False
     if mem_size > HOTCORE_BUDGET_BYTES:
@@ -407,6 +409,31 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
                     mem_size = os.path.getsize(mem_path)
 
 
+        # Demote only removes blocks spine promoted. memory() appends bypass
+        # _promote_to_hotcore and its cap, so the file grew ~2.6 KB a day past
+        # the budget (38,596 bytes on 2026-10-22) with nothing to trim it. Cap it
+        # here too, keeping every block spine cannot retrieve.
+        demote_end = mem_size
+        cap: Dict[str, Any] = {"evicted": 0, "held": 0}
+        if mem_size > HOTCORE_BUDGET_BYTES and not rewrite_failed:
+            try:
+                with _hotcore_lock():
+                    blocks = _read_hotcore_blocks(mem_path)
+                    capped = _evict_to_budget(blocks, idx.conn, keep_last=0, report=cap)
+                    if len(capped) < len(blocks):
+                        backup = f"{mem_path}.bak.cap.{time.strftime('%Y%m%dT%H%M%S')}"
+                        shutil.copy2(mem_path, backup)
+                        _write_hotcore_blocks(mem_path, capped)
+            except Exception as e:  # noqa: BLE001
+                logger.error("hot-core cap failed, file left as it was: %s", e)
+                report.setdefault("warnings", []).append(f"hot-core cap failed ({e})")
+                cap = {"evicted": 0, "held": 0}
+            report["passes"]["cap"] = (
+                f"evicted {cap['evicted']} block(s), skipped {cap['held']} that spine "
+                f"does not hold verbatim, now {os.path.getsize(mem_path):,} bytes "
+                f"(log: {HOTCORE_EVICT_LOG})")
+            mem_size = os.path.getsize(mem_path)
+
         # Gate on the state, not on why. The previous version only warned when a
         # promoted row could not be matched, which is the RARE case; the common
         # one is simply running out of promoted rows to demote, where
@@ -419,6 +446,10 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
             # for eight days.
             if rewrite_failed:
                 why = "the hot-core rewrite failed, so nothing was removed"
+            elif cap["held"]:
+                why = (f"{cap['held']} block(s) cannot be dropped because spine does not "
+                       f"hold them verbatim (memory() writes or merged blocks). Run "
+                       f"sync_hotcore.py, then the LLM pass below")
             elif unmatched:
                 why = (f"{unmatched} promoted observation(s) could not be matched "
                        f"to a block")
@@ -435,7 +466,7 @@ def run_consolidation(config: SpineConfig, profile: str = "") -> Dict[str, Any]:
 
     report["passes"]["demote"] = (
         f"demoted {demoted} stale entries "
-        f"(MEMORY.md: {start_size:,} → {mem_size:,} bytes)"
+        f"(MEMORY.md: {start_size:,} → {demote_end:,} bytes)"
     )
 
     report["active_count"] = idx.count_active()
@@ -527,7 +558,32 @@ def _hotcore_size(blocks: List[str]) -> int:
     return sum(len(b.encode("utf-8")) for b in blocks) + 4 * (len(blocks) - 1) + 1
 
 
-def _evict_to_budget(blocks: List[str], keep_last: int = 1) -> List[str]:
+def _held_verbatim(block: str, conn) -> bool:
+    """True only if a searchable observation contains this block's text verbatim.
+
+    Containment, not token presence. Profile is not checked: recall spans
+    every profile by default. coverage.is_retrievable passes a block whose
+    rarest tokens appear anywhere in the corpus, in any row and any status; the
+    2026-10-23 review found 11 live blocks it passed that no single row held.
+    Spine promotes blocks verbatim and sync_hotcore imports them verbatim, so a
+    block that really came from spine passes this; a memory()-only or merged one
+    does not, and stays.
+    """
+    from .coverage import strip_tag
+    body = strip_tag(block)
+    # A short body matches inside unrelated rows ("ok" in "a token book").
+    if len(body) < 20:
+        return False
+    # promoted/demoted only: decay archives 'active' rows, which would leave an
+    # evicted fact in the log and the backup alone.
+    return conn.execute(
+        "SELECT 1 FROM observations WHERE status IN ('promoted', 'demoted') "
+        "AND instr(content, ?) > 0 LIMIT 1",
+        (body,)).fetchone() is not None
+
+
+def _evict_to_budget(blocks: List[str], conn, keep_last: int = 1,
+                     report: Optional[Dict[str, Any]] = None) -> List[str]:
     """Drop the oldest non-rule blocks until MEMORY.md fits HOTCORE_BUDGET_BYTES.
 
     Chin, 2026-10-20, choosing this over raising the ceiling: "Cap the file and
@@ -539,46 +595,63 @@ def _evict_to_budget(blocks: List[str], keep_last: int = 1) -> List[str]:
          ("11 [R] rules, none lost"), so dropping one turns a size warning into a
          real failure.
       2. never the block just promoted (keep_last, counted from the end).
-      3. oldest first. Promotion appends, so file order is age order.
+      3. never a block no searchable observation holds verbatim (_held_verbatim).
+         Hermes's memory() writes straight into the file; on 2026-10-23 six such
+         blocks existed nowhere else. With no `conn` nothing is provable, so
+         nothing is dropped.
+      4. oldest first. Promotion appends, so file order is age order.
 
-    A dropped block is not deleted from the spine store: it was promoted FROM an
-    observation and stays there, retrievable by recall. Every eviction is
-    appended to HOTCORE_EVICT_LOG so a fact that later goes missing can be traced
-    to the pass that dropped it. If nothing is evictable the file stays over
-    budget and the caller reports it: losing a fact to satisfy a number is worse
-    than a loud warning.
+    Every eviction is appended to HOTCORE_EVICT_LOG with its FULL text, so a
+    wrong eviction is recoverable, not just traceable. If nothing is evictable
+    the file stays over budget and the caller reports it: losing a fact to
+    satisfy a number is worse than a loud warning. `report`, when given, gets
+    `evicted` and `held` counts.
     """
-    if _hotcore_size(blocks) <= HOTCORE_BUDGET_BYTES:
+    if report is not None:
+        report.update(evicted=0, held=0)
+    if _hotcore_size(blocks) <= HOTCORE_BUDGET_BYTES or conn is None:
         return blocks
     kept = list(blocks)
     protected = max(len(blocks) - keep_last, 0)
     dropped: List[str] = []
+    held = 0
     for block in blocks[:protected]:
         if _hotcore_size(kept) <= HOTCORE_BUDGET_BYTES:
             break
         if block.lstrip().startswith("[R]"):
+            continue
+        if not _held_verbatim(block, conn):
+            held += 1
             continue
         try:
             kept.remove(block)
         except ValueError:
             continue
         dropped.append(block)
+    if report is not None:
+        report.update(evicted=len(dropped), held=held)
     if dropped:
+        # Log BEFORE the caller rewrites the file. If the log cannot be written,
+        # evict nothing: an unlogged eviction is the unrecoverable case.
         try:
             os.makedirs(os.path.dirname(HOTCORE_EVICT_LOG), exist_ok=True)
             stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             with open(HOTCORE_EVICT_LOG, "a", encoding="utf-8") as f:
                 for b in dropped:
-                    f.write(f"{stamp}\t{len(b.encode('utf-8'))}B\t{b[:120].replace(chr(10), ' ')}\n")
+                    f.write(json.dumps({"ts": stamp, "bytes": len(b.encode("utf-8")),
+                                        "block": b}, ensure_ascii=False) + "\n")
         except OSError:
-            logger.warning("Evicted %d block(s) from MEMORY.md but could not write the log", len(dropped))
+            logger.error("Could not write %s; evicting nothing", HOTCORE_EVICT_LOG)
+            if report is not None:
+                report.update(evicted=0)
+            return blocks
         logger.warning("Evicted %d block(s) from MEMORY.md to hold the %d-byte budget "
-                       "(now %d bytes); they stay retrievable from the spine store",
+                       "(now %d bytes); each is held verbatim in the spine store",
                        len(dropped), HOTCORE_BUDGET_BYTES, _hotcore_size(kept))
     if _hotcore_size(kept) > HOTCORE_BUDGET_BYTES:
         logger.error("MEMORY.md is still %d bytes over the %d-byte budget after evicting "
-                     "%d block(s); nothing injective left to drop",
-                     _hotcore_size(kept), HOTCORE_BUDGET_BYTES, len(dropped))
+                     "%d block(s); %d held because spine does not hold them verbatim",
+                     _hotcore_size(kept), HOTCORE_BUDGET_BYTES, len(dropped), held)
     return kept
 
 
@@ -756,7 +829,7 @@ def _hotcore_semantic_duplicate(body: str, block_bodies: List[str]) -> Optional[
 
 
 def _promote_to_hotcore(obs_id: str, content: str, obs_type: str,
-                        config: SpineConfig) -> str:
+                        config: SpineConfig, conn=None) -> str:
     """Append an observation to the MEMORY.md hot core.
 
     Returns "written", "duplicate", or "failed" -- the caller must distinguish
@@ -798,7 +871,7 @@ def _promote_to_hotcore(obs_id: str, content: str, obs_type: str,
                 return "duplicate"
             # Chin, 2026-10-20: cap the always-loaded file. The weakest
             # block goes and its fact stays in the spine store, retrievable.
-            _write_hotcore_blocks(mem_path, _evict_to_budget(blocks + [entry]))
+            _write_hotcore_blocks(mem_path, _evict_to_budget(blocks + [entry], conn))
         logger.info("Promoted %s to MEMORY.md: %s", obs_id, content[:80])
         return "written"
     except Exception as e:  # noqa: BLE001
