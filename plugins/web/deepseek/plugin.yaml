@@ -1,0 +1,7 @@
+name: web-deepseek
+version: 1.0.0
+description: "DeepSeek Search + Fetch. $0.75 per 1,000 successful requests per endpoint, billed from the first call. Requires DEEPSEEK_API_KEY — https://platform.deepseek.com/api_keys."
+author: NousResearch
+kind: backend
+provides_web_providers:
+  - deepseek
